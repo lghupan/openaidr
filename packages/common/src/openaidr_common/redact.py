@@ -1,3 +1,4 @@
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -104,6 +105,16 @@ def is_secret_key(key):
     return _REDACTOR.is_secret_key(key)
 
 
+def redact_key(key):
+    if not isinstance(key, str):
+        return key
+    redacted = redact_string(key)[0]
+    if redacted == key:
+        return key
+    digest = hashlib.sha256(key.encode()).hexdigest()[:8]
+    return f"{redacted}#{digest}"
+
+
 def contains_secret(value, _depth=0):
     if _depth > MAX_DEPTH:
         return True
@@ -140,7 +151,9 @@ def redact_value(value, _depth=0):
         return "[REDACTED:depth-limit]"
     if isinstance(value, dict):
         return {
-            key: "[REDACTED]" if is_secret_key(key) else redact_value(item, _depth + 1)
+            redact_key(key): "[REDACTED]"
+            if is_secret_key(key)
+            else redact_value(item, _depth + 1)
             for key, item in value.items()
         }
     if isinstance(value, list):
