@@ -244,6 +244,30 @@
         "tests/test_desktop_credits.py",
         "tests/test_google_connection.py"
       ]
+    },
+    {
+      "source_repository": "opensecurainc/openaidr-internal",
+      "source_commit": "f6039e3c39dc18fb76dab388969123e8f7b4e1af",
+      "source_base_commit": "ed80038d6c3e00b9c74c35043e15e3140e5b759a",
+      "target_base_commit": "21fe0af046a600164badc5638ebc2d522141ba61",
+      "paths": [
+        "apps/desktop/CHANGELOG.md",
+        "apps/desktop/README.md",
+        "apps/desktop/docs/about-model-pricing.png",
+        "apps/desktop/src/about.ts",
+        "apps/desktop/tests/enrollment.spec.ts",
+        "pyproject.toml",
+        "scripts/build_desktop.py",
+        "scripts/linux_sensor.spec",
+        "src/openaidr/core/agent_usage.py",
+        "src/openaidr/sensor/litellm-LICENSE.txt",
+        "src/openaidr/sensor/model_pricing.py",
+        "src/openaidr/sensor/runtime.py",
+        "src/openaidr/sensor/telemetry.py",
+        "src/openaidr/sensor/usage.py",
+        "src/openaidr/sensor/usage_import.py",
+        "tests/test_local_usage.py"
+      ]
     }
   ]
 }

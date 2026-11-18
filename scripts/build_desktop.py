@@ -710,6 +710,8 @@ def freeze(work, entry, name, runtime_options, windowed=False, onedir=False):
             "--hidden-import",
             "tzdata",
             "--add-data",
+            f"{ROOT / 'src' / 'openaidr' / 'sensor' / 'litellm-LICENSE.txt'}{os.pathsep}openaidr/sensor",
+            "--add-data",
             f"{ROOT / 'src' / 'openaidr' / 'sensor' / 'hook_opencode.js'}{os.pathsep}openaidr/sensor",
             *([] if os.environ.get("OPENAIDR_DESKTOP_EDITION") == "enterprise" else [
                 "--add-data",

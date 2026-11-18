@@ -48,6 +48,14 @@ before the event enters the delivery queue; the native receiver always applies
 it and removes raw API bodies. Transcript collectors are opt-in. Fields that
 capture disables are sent as metadata-only records, never as altered content.
 
+## Where the sensor gets model prices
+
+When telemetry is enabled, the sensor downloads a public JSON pricing table
+from `raw.githubusercontent.com` to estimate local Codex costs. GitHub sees the
+connection's source IP address, request time, and the previous table's ETag
+when available. The request contains no device credentials, model names,
+prompts, or token counts. The sensor caches the rates for offline use.
+
 ## What the dashboard server keeps
 
 The server you run stores the delivered events, inventories, posture findings,

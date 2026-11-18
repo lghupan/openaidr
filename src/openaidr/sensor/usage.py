@@ -127,7 +127,7 @@ def initialize(db, scope):
     usage_recovery.reconcile(db, scope)
 
 
-def record(db, scope, export):
+def record(db, scope, export, catalog=None):
     """Called in the export transaction, including for queues from older sensors."""
     from openaidr.core.agent_usage import extract
     from openaidr.core.telemetry import decode_export
@@ -141,7 +141,7 @@ def record(db, scope, export):
         )
         antigravity_usage.record(db, scope, decoded)
         hook_estimates.record(db, scope, decoded)
-        events = [event for event in extract(decoded) if event["usage"] is not None and not event["demo"]]
+        events = [event for event in extract(decoded, catalog=catalog) if event["usage"] is not None and not event["demo"]]
         # Legacy history keeps its fixed boundary. Exact recovered request keys
         # can also accept a native correction across that boundary.
         cutoffs = dict(db.execute("SELECT application,min(cutoff) FROM usage_imports GROUP BY application"))

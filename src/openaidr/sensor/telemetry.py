@@ -89,11 +89,12 @@ class QueueFull(Exception):
 class ExportQueue:
     """Retained exports survive restarts; capacity exhaustion rejects new input."""
 
-    def __init__(self, path, max_bytes=512 << 20, *, usage_scope=None):
+    def __init__(self, path, max_bytes=512 << 20, *, usage_scope=None, pricing=None):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.max_bytes = max(4096, int(max_bytes))
         self.usage_scope = usage_scope
+        self.pricing = pricing
         self.lock = threading.RLock()
         self.db = sqlite3.connect(self.path, timeout=15, check_same_thread=False)
         if os.name != "nt":
@@ -171,7 +172,7 @@ class ExportQueue:
                         for batch_id in batch_ids:
                             usage.record(self.db, self.usage_scope, self.db.execute(
                                 "SELECT * FROM exports WHERE batch_id=?", (batch_id,),
-                            ).fetchone())
+                            ).fetchone(), self.pricing)
                         usage.prune(self.db)
             except sqlite3.OperationalError as exc:
                 if "full" in str(exc).lower():
@@ -195,7 +196,7 @@ class ExportQueue:
                         )
                         if self.usage_scope and export["usage_projected"] < usage.PROJECTION_VERSION:
                             with self.db:
-                                usage.record(self.db, self.usage_scope, export)
+                                usage.record(self.db, self.usage_scope, export, self.pricing)
                                 usage.prune(self.db)
                         return export
                 after = rows[-1]["seq"]
@@ -467,10 +468,11 @@ class Telemetry:
         self.options = settings(config, persist_token=True)
         self.coordinator = coordinator or CaptureCoordinator(config)
         self.capture = capture
+        from .model_pricing import Catalog
         self.queue = ExportQueue(
             Path(config["data_dir"]) / "telemetry.sqlite3",
             self.options["max_queue_bytes"],
-            usage_scope=usage.local_identity(config),
+            usage_scope=usage.local_identity(config), pricing=Catalog(config),
         )
         self.http = httpx.Client(timeout=30, **transport)
         self.received = 0
@@ -655,6 +657,9 @@ class Telemetry:
             self.http, self.headers = replacement, headers
             self.credential_generation = self.config.get("credential_generation")
             previous.close()
+
+    def refresh_pricing(self, stop):
+        self.queue.pricing.run(stop, self.paused)
 
     def import_usage(self, stop, *, watch=False):
         from .usage_import import run

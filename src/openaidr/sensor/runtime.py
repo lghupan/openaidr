@@ -1061,7 +1061,7 @@ class Sensor:
         ]
         funcs.append(self.project_metadata.run)
         if self.telemetry:
-            funcs.extend([self.telemetry.receive, self.telemetry.forward,
+            funcs.extend([self.telemetry.receive, self.telemetry.forward, self.telemetry.refresh_pricing,
                           lambda stop: self.telemetry.import_usage(stop, watch=True)])
         if self.inventory.options["enabled"]:
             funcs.append(self.inventory.run)

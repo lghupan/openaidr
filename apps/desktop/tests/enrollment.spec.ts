@@ -1488,7 +1488,7 @@ for (const maxWindowHeight of [720, 240]) {
   });
 }
 
-test('About works without the sensor and keeps license and support actions local', async ({page}) => {
+test('About works without the sensor and keeps license and support actions local', async ({page}, testInfo) => {
   await boot(page, {status:unenrolled,statusError:'The sensor is unavailable.'});
   await expect(page.getByRole('checkbox', {name:'Show in menu bar'})).toBeHidden();
   const button = page.getByRole('button', {name:'About',exact:true});
@@ -1509,6 +1509,10 @@ test('About works without the sensor and keeps license and support actions local
   await expect(page.locator('#licenses-title')).toBeFocused();
   await dialog.locator('summary', {hasText:'Geist fonts'}).click();
   await expect(dialog.locator('pre').first()).toContainText('SIL OPEN FONT LICENSE');
+  await dialog.locator('summary', {hasText:'Geist fonts'}).click();
+  await dialog.locator('summary', {hasText:'LiteLLM model pricing'}).click();
+  await expect(dialog.locator('details', {hasText:'LiteLLM model pricing'}).locator('pre')).toContainText('Copyright (c) 2023 Berri AI');
+  await dialog.locator('details[open]').screenshot({path:testInfo.outputPath('about-model-pricing.png'),animations:'disabled'});
   await page.keyboard.press('Escape');
   await expect(dialog).toBeHidden();
   await expect(button).toBeFocused();
