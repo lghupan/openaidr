@@ -1616,3 +1616,74 @@ def test_local_windows_retention_and_clock_changes(tmp_path, clock, local_timezo
                 assert queue.db.execute("SELECT min(happened_at) FROM usage_calls").fetchone()[0] == since.timestamp()
         finally:
             queue.close()
+
+
+def test_codex_catalog_refresh_and_offline_costs(tmp_path, monkeypatch):
+    from openaidr.sensor import model_pricing
+
+    cfg = config(tmp_path)
+    model = "gpt-6.2-astra"
+    row = dict(litellm_provider="openai", mode="chat", input_cost_per_token=8e-6,
+               cache_read_input_token_cost=.4e-6, cache_creation_input_token_cost=10e-6,
+               output_cost_per_token=40e-6, input_cost_per_token_ultrafast=24e-6,
+               input_cost_per_token_above_272k_tokens=16e-6, output_cost_per_token_above_272k_tokens=60e-6,
+               cache_creation_input_token_cost_above_12hr=20e-6)
+    data = {model: row, "gpt-6-astra": row, "azure/" + model: {**row, "litellm_provider": "azure"}}
+    replies = iter([httpx.Response(200, json=data, headers={"ETag": '"prices"'}),
+                    httpx.Response(304), httpx.Response(200, json={"error": "unavailable"}),
+                    httpx.Response(429, headers={"Retry-After": "7200"})])
+    requests = []
+
+    def serve(request):
+        requests.append(request)
+        assert str(request.url) == model_pricing.URL and not request.content
+        assert "Authorization" not in request.headers and "Cookie" not in request.headers
+        return next(replies)
+
+    telemetry = Telemetry(cfg)
+    monkeypatch.setattr(model_pricing.network_proxy, "transport_options",
+                        lambda config, verify: {"transport": httpx.MockTransport(serve)})
+    try:
+        catalog = telemetry.queue.pricing
+        assert catalog.quote(model, "", (10, 0, 0, 1), {}, None) is NotImplemented
+        catalog.refresh()
+        when = datetime.now(timezone.utc)
+        # Exercise the actual local export projection, not just the rate table.
+        events = [
+            event("priced", model=model, cached_token_count=900),
+            event("unpriced", model=model, service_tier="flex"),
+            event("reported", model=model, service_tier="flex", cost_usd=".50"),
+            event("different-provider", model="azure/" + model),
+            event("bundled-model", model="gpt-6.1-sol"),
+            event("bundled-fast", model="gpt-6-astra", service_tier="fast"),
+        ]
+        for item in events:
+            telemetry.accept("logs", body(when, item), "application/json")
+        summary = read(cfg, 1)["summary"]
+        assert (summary["calls"], summary["priced_calls"]) == (6, 4)
+        assert summary["cost_usd"] == pytest.approx(.50916 + .004 + .04)
+        catalog.refresh()
+        assert requests[1].headers["If-None-Match"] == '"prices"'
+        cached = catalog.path.read_bytes()
+        assert b"Copyright (c) 2023 Berri AI" in cached
+        with pytest.raises(ValueError):
+            catalog.refresh()
+        with pytest.raises(httpx.HTTPStatusError):
+            catalog.refresh()
+        assert catalog.next_attempt >= time.time() + 7190
+        assert catalog.path.read_bytes() == cached
+
+        offline = model_pricing.Catalog(cfg)
+        assert len(requests) == 4 and offline.etag == '"prices"'
+        assert float(offline.quote(model, "", (272001, 0, 0, 1), {}, when)) == pytest.approx(4.352076)
+        assert float(offline.quote(model, "", (0, 0, 1, 0), {"prompt_cache_retention": "12h"}, when)) == 20e-6
+        assert offline.quote(model, "fast", (1, 0, 0, 0), {}, when) is NotImplemented
+        assert offline.quote(model, "", (1, 0, 0, 0), {}, when - timedelta(days=1)) is NotImplemented
+        # Missing models schedule at most one early fetch per hour; repeats leave the schedule alone.
+        offline.quote("gpt-new", "", (1, 0, 0, 0), {}, when)
+        assert offline.due == offline.checked + model_pricing.HOUR
+        offline.due += 1
+        offline.quote("gpt-new", "", (1, 0, 0, 0), {}, when)
+        assert offline.due == offline.checked + model_pricing.HOUR + 1
+    finally:
+        telemetry.close()

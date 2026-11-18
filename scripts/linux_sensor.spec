@@ -18,6 +18,7 @@ analysis = Analysis(
     datas=[
         (str(work / "_build.json"), "openaidr"),
         (str(metadata), metadata.name),
+        (str(root / "src/openaidr/sensor/litellm-LICENSE.txt"), "openaidr/sensor"),
         (str(root / "src/openaidr/sensor/hook_opencode.js"), "openaidr/sensor"),
         *([] if info.get("desktop_edition") == "enterprise" else [
             (str(root / "src/openaidr/sensor/local_runtime_source.tar.gz"), "openaidr/sensor"),

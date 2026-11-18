@@ -1,4 +1,5 @@
 import { isTauri } from '@tauri-apps/api/core';
+import pricingLicense from '../../../src/openaidr/sensor/litellm-LICENSE.txt?raw';
 import geistLicense from '../../../packages/ui/fonts/Geist-OFL.txt?raw';
 import osqueryLicense from '../licenses/osquery-LICENSE?raw';
 import apacheLicense from '../licenses/osquery-Apache-2.0.txt?raw';
@@ -23,6 +24,7 @@ export function initAbout(request: (action:string) => Promise<unknown>) {
   const licenses = panel.querySelector<HTMLElement>('#about-licenses')!;
   for (const [name, content] of [
     ['Geist fonts', geistLicense],
+    ['LiteLLM model pricing', pricingLicense],
     ['osquery (macOS)', osqueryLicense],
     ['Apache License 2.0', apacheLicense],
     ['osquery Python bindings (macOS)', pythonLicense],

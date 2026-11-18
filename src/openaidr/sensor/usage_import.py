@@ -84,8 +84,8 @@ def timestamp(value):
         return None
 
 
-def event(application, ident, when, attrs, effort):
-    measured = measure(attrs, application + ".api_request", when=when)
+def event(application, ident, when, attrs, effort, catalog=None):
+    measured = measure(attrs, application + ".api_request", when=when, catalog=catalog)
     if measured is None or not measured["tokens"]:
         return None
     key = hashlib.sha256(json.dumps([application, ident], sort_keys=True).encode()).hexdigest()
@@ -157,7 +157,7 @@ def codex_counts(value):
     return counts if all(count is not None for count in counts.values()) else None
 
 
-def codex(record, state):
+def codex(record, state, catalog=None):
     payload = record.get("payload")
     if not isinstance(payload, dict):
         return None
@@ -196,7 +196,7 @@ def codex(record, state):
     if not ident:
         return None
     attrs = dict(counts, model=state.get("model", ""), service_tier=state.get("tier", ""))
-    return event("codex", [ident, record["timestamp"], total], when, attrs, state.get("effort"))
+    return event("codex", [ident, record["timestamp"], total], when, attrs, state.get("effort"), catalog)
 
 
 def gemini(record):
@@ -450,7 +450,7 @@ def history_once(config, queue, stop, paused=lambda: False):
                     # Codex cumulative counters and fork metadata need source
                     # order. Defer old writes instead of reversing that input.
                     for record in records(path, stop, paused, application):
-                        item = codex(record, state) if application == "codex" else gemini(record) if application == "gemini" else claude(record)
+                        item = codex(record, state, queue.pricing) if application == "codex" else gemini(record) if application == "gemini" else claude(record)
                         if item and since <= item["time"].timestamp() < cutoff:
                             batch.append(item)
                         if len(batch) >= BATCH_SIZE:
@@ -487,7 +487,7 @@ def history_once(config, queue, stop, paused=lambda: False):
     return len(completed) == len(pending)
 
 
-def request_record(record, application, state, cutoff, sensor_id=""):
+def request_record(record, application, state, cutoff, sensor_id="", catalog=None):
     """Return an exact request key and accounting fields, never match by time/counts."""
     if application == "workbuddy":
         from .workbuddy_usage import request_record as workbuddy_record
@@ -528,7 +528,7 @@ def request_record(record, application, state, cutoff, sensor_id=""):
             same_turn = text(payload, "turn_id") == state.get("turn") and bool(state.get("turn"))
             item = event(application, ident, when, dict(counts, model=state.get("model", "") if same_turn else "",
                          service_tier=state.get("tier", "") if same_turn else ""),
-                         state.get("effort") if same_turn else None)
+                         state.get("effort") if same_turn else None, catalog)
     # This is the existing core.agent_usage.extract identity for both providers.
     key = hashlib.sha256(json.dumps((application, ident)).encode()).hexdigest()
     if item is not None:
@@ -707,7 +707,7 @@ def requests_once(config, queue, stop, paused=lambda: False):
                         record = READERS[app].validate_json(raw) if app == "workbuddy" else decode(raw, READERS[app])
                         if not isinstance(record, dict):
                             raise ValueError("not a record")
-                        key, item, bad, unmatched = request_record(record, app, state, cutoffs[app], queue.usage_scope)
+                        key, item, bad, unmatched = request_record(record, app, state, cutoffs[app], queue.usage_scope, queue.pricing)
                         aliases, boundary, unlinked = request_link(record, app, state, item, cutoffs[app])
                     except (ValueError, UnicodeError, RecursionError, TypeError, AttributeError):
                         invalid += 1

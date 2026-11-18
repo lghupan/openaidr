@@ -84,7 +84,32 @@ def event_time(item, attrs, received):
     return received, ""
 
 
-def usage(attrs, kind, *, when=None):
+def codex_cost(model, attrs, counts, when, catalog):
+    tier = text(attrs, "service_tier")
+    if catalog is not None:
+        quote = catalog.quote(model, tier, counts, attrs, when)
+        if quote is not NotImplemented:
+            return quote
+    if model not in OPENAI_RATES:
+        return None
+    if catalog is not None and counts[2] and attrs.get("prompt_cache_retention") not in (None, "", "30m"):
+        # The bundled table only contains the default cache-write rate.
+        return None
+    multiplier = {
+        "": 1, "default": 1, "auto": 1, "standard": 1,
+        "priority": 2, "fast": 2,
+        "ultrafast": 6 if model in {"gpt-6-astra", "gpt-6.1-sol"} else None,
+        "flex": Decimal("0.5"), "batch": Decimal("0.5"),
+    }.get(tier)
+    if multiplier is None:
+        return None
+    rates = [Decimal(rate) for rate in OPENAI_RATES[model]]
+    if sum(counts[:3]) > 272_000:
+        rates = [rate * (Decimal("1.5") if i == 3 else 2) for i, rate in enumerate(rates)]
+    return sum(n * rate for n, rate in zip(counts, rates)) * multiplier / 1_000_000
+
+
+def usage(attrs, kind, *, when=None, catalog=None):
     codex = kind.startswith("codex.")
     cursor = kind == "cursor.api_request"
     if cursor:
@@ -125,35 +150,10 @@ def usage(attrs, kind, *, when=None):
     ):
         cost = Decimal(0)
         source = "calculated"
-    if cost is None and valid and codex and model in OPENAI_RATES:
-        tier = text(attrs, "service_tier")
-        multiplier = {
-            "": 1,
-            "default": 1,
-            "auto": 1,
-            "standard": 1,
-            "priority": 2,
-            "fast": 2,
-            "ultrafast": 6 if model in {"gpt-6-astra", "gpt-6.1-sol"} else None,
-            "flex": Decimal("0.5"),
-            "batch": Decimal("0.5"),
-        }.get(tier)
-        if multiplier is not None:
-            rates = [Decimal(rate) for rate in OPENAI_RATES[model]]
-            if input_count > 272_000:
-                rates = [
-                    r * (Decimal("1.5") if i == 3 else 2) for i, r in enumerate(rates)
-                ]
-            cost = (
-                sum(
-                    n * r
-                    for n, r in zip(
-                        (input_count - cached - written, cached, written, output), rates
-                    )
-                )
-                * multiplier
-                / 1_000_000
-            )
+    if cost is None and valid and codex:
+        counts = (input_count - cached - written, cached, written, output)
+        cost = codex_cost(model, attrs, counts, when, catalog)
+        if cost is not None:
             source = "calculated"
     if not valid and cost is None:
         return None
@@ -172,7 +172,7 @@ def usage(attrs, kind, *, when=None):
     }
 
 
-def extract(export):
+def extract(export, *, catalog=None):
     """Parse an export once into cost and correlation metadata."""
     occurrences = defaultdict(int)
     received = export["received_at"]
@@ -257,7 +257,7 @@ def extract(export):
             identity = (*identity, occurrences[identity])
         else:
             identity = (str(export["id"]), index)
-        measured = usage(attrs, name, when=when if stamp else None) if is_usage else None
+        measured = usage(attrs, name, when=when if stamp else None, catalog=catalog) if is_usage else None
         if is_usage and measured is None:
             continue
         yield {

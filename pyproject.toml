@@ -32,7 +32,7 @@ include = ["openaidr", "openaidr.*"]
 namespaces = false
 
 [tool.setuptools.package-data]
-openaidr = ["_build.json", "server/migrations/*.sql", "server/_dex/LICENSE", "server/_dex/api.proto", "core/gateway-plugins.json", "sensor/hook_opencode.js", "sensor/local_runtime_source.tar.gz", "web/**/*"]
+openaidr = ["_build.json", "server/migrations/*.sql", "server/_dex/LICENSE", "server/_dex/api.proto", "core/gateway-plugins.json", "sensor/hook_opencode.js", "sensor/litellm-LICENSE.txt", "sensor/local_runtime_source.tar.gz", "web/**/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

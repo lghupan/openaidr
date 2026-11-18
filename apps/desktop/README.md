@@ -237,6 +237,26 @@ databases are read. Existing installations import Codex and Claude usage only
 from before local collection began; Gemini imports once when support is first
 installed. This adds historical Gemini usage, not ongoing Gemini collection. The chart
 fills on its normal refresh; missing logs keep the existing zero totals.
+For local Codex cost estimates, a telemetry-enabled sensor reads LiteLLM's
+[public pricing catalog](https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json).
+Each device checks once a day on a staggered schedule. A new model can prompt
+an earlier check, at most once an hour. The background request goes to
+`raw.githubusercontent.com` through the configured proxy, with no device
+credentials, model names, prompts, or usage counts. GitHub receives the
+connection's source IP and request time. The sensor sends the previous ETag
+and keeps its last valid table on disk for offline use. About includes the
+[LiteLLM MIT notice](docs/about-model-pricing.png), also stored with the local cache.
+
+Provider-reported costs take precedence. For a Codex call without a reported
+cost, the sensor matches the direct OpenAI model ID, input length, cache rates,
+and service tier. If the catalog lacks an applicable rate, the sensor tries
+the bundled quote for that exact model and tier. If neither source covers
+the call, its cost is unknown. Saved costs keep
+their original values. Prices observed after a historical call cannot establish
+its cost; the previous bundled calculation still applies to those older calls.
+This update applies to the local Usage view. Server reports have a separate
+pricing snapshot. Rolling back restores bundled pricing for incoming calls.
+
 Only usage metadata enters the local ledger, with no transcript content or
 historical uploads. Restarting resumes an interrupted import without adding
 the same usage twice. Changing enrollment does not import the old history into
