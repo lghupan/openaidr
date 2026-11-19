@@ -15,7 +15,10 @@ from . import data_lifecycle
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('operation', choices=('init-register', 'register', 'restore-check'))
+    parser.add_argument('operation', choices=('init-register', 'register', 'restore-check', 'offboard'))
+    parser.add_argument('--execute', action='store_true', help='execute an offboarding plan; default is read-only inventory')
+    parser.add_argument('--sha256', help='exact offboard check digest')
+    parser.add_argument('--request-id', help='operator-generated UUID, reused for retries')
     args = parser.parse_args(argv)
     try:
         cfg = from_env()
@@ -30,6 +33,12 @@ def main(argv=None):
                     result = {'state': 'registered', 'tenant_id': cfg.tenant_id}
                 elif args.operation == 'restore-check':
                     result = data_lifecycle.replay(st, cfg, restore=True)
+                elif args.execute:
+                    if not args.sha256 or not args.request_id:
+                        raise ValueError('Exact plan digest and request ID required')
+                    result = data_lifecycle.offboard(st, cfg, args.sha256, args.request_id)
+                else:
+                    result = data_lifecycle.offboard_plan(st, cfg)
             finally:
                 st.close()
         print(json.dumps(result, default=str))
