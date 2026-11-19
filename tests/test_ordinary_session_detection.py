@@ -266,7 +266,7 @@ def test_changed_idle_setting_rechecks_queued_sessions_before_admission(system):
 
 def test_committing_older_wakeup_after_snapshot_cannot_lose_late_scores(system):
     configure(system)
-    system.db.execute("INSERT INTO tenant_telemetry_retention(tenant_id,mode) VALUES($1,'90')", system.tenant["id"])
+    system.db.execute("INSERT INTO tenant_telemetry_retention(tenant_id,mode) VALUES($1,'90') ON CONFLICT(tenant_id) DO UPDATE SET mode=EXCLUDED.mode", system.tenant["id"])
     value = captured(system)
     before = finalize(system, value)
     with system.db.transaction() as writer:
@@ -285,7 +285,7 @@ def test_committing_older_wakeup_after_snapshot_cannot_lose_late_scores(system):
 
 def test_timer_reevaluation_reuses_evidence_but_rechecks_ranking(system, monkeypatch):
     configure(system, selection_policy="risk_budget", investigation_percent="50")
-    system.db.execute("INSERT INTO tenant_telemetry_retention(tenant_id,mode) VALUES($1,'90')", system.tenant["id"])
+    system.db.execute("INSERT INTO tenant_telemetry_retention(tenant_id,mode) VALUES($1,'90') ON CONFLICT(tenant_id) DO UPDATE SET mode=EXCLUDED.mode", system.tenant["id"])
     target, competitor = captured(system, (85, 80)), captured(system, (90, 90))
     finalize(system, target)
     finalize(system, competitor)
@@ -318,7 +318,7 @@ def test_timer_reevaluation_reuses_evidence_but_rechecks_ranking(system, monkeyp
 @pytest.mark.parametrize("change", ["risk", "event", "settings", "legacy"])
 def test_evidence_summary_invalidates_on_new_inputs_and_old_state(system, monkeypatch, change):
     configure(system)
-    system.db.execute("INSERT INTO tenant_telemetry_retention(tenant_id,mode) VALUES($1,'90')", system.tenant["id"])
+    system.db.execute("INSERT INTO tenant_telemetry_retention(tenant_id,mode) VALUES($1,'90') ON CONFLICT(tenant_id) DO UPDATE SET mode=EXCLUDED.mode", system.tenant["id"])
     value = captured(system)
     before = finalize(system, value)
     if change == "risk":
@@ -361,7 +361,7 @@ def test_evidence_summary_invalidates_after_partition_retirement(system, monkeyp
     day = system.db.scalar("SELECT storage_day FROM events WHERE id=$1", value.events[0]["id"])
 
     def retire():
-        system.db.execute("INSERT INTO tenant_telemetry_retention(tenant_id,mode) VALUES($1,'7')", tenant)
+        system.db.execute("INSERT INTO tenant_telemetry_retention(tenant_id,mode) VALUES($1,'7') ON CONFLICT(tenant_id) DO UPDATE SET mode=EXCLUDED.mode", tenant)
         with system.db.transaction() as conn:
             assert telemetry_retention._drop(system.db, tenant, day, conn)
         assert system.db.scalar("SELECT count(*) FROM ordinary_session_input_dirty WHERE session_id=$1", value.id) == 0
@@ -389,7 +389,7 @@ def test_evidence_summary_invalidates_after_partition_retirement(system, monkeyp
 def test_cached_batch_ranks_once_against_the_complete_tenant_population(system, monkeypatch):
     configure(system, selection_policy="risk_budget", investigation_percent="50")
     tenant = system.tenant["id"]
-    system.db.execute("INSERT INTO tenant_telemetry_retention(tenant_id,mode) VALUES($1,'90')", tenant)
+    system.db.execute("INSERT INTO tenant_telemetry_retention(tenant_id,mode) VALUES($1,'90') ON CONFLICT(tenant_id) DO UPDATE SET mode=EXCLUDED.mode", tenant)
     targets = [captured(system, scores) for scores in ((85, 80), (90, 90), (96,))]
     outside_batch = captured(system, (0,))
     captured(system, (99,), device="foreign_sensor")
@@ -429,7 +429,7 @@ def test_cached_batches_keep_global_worker_tenants_separate(system, monkeypatch)
     aggregation.save_settings(system.db, foreign, {key: settings[key] for key in aggregation.SETTINGS}, {})
     groups = {}
     for scope, device, age in ((tenant, "sensor", 2), (foreign, "foreign_sensor", 1)):
-        system.db.execute("INSERT INTO tenant_telemetry_retention(tenant_id,mode) VALUES($1,'90')", scope)
+        system.db.execute("INSERT INTO tenant_telemetry_retention(tenant_id,mode) VALUES($1,'90') ON CONFLICT(tenant_id) DO UPDATE SET mode=EXCLUDED.mode", scope)
         values = [captured(system, (96,), device=device), captured(system, (97,), device=device)]
         for value in values:
             finalize(system, value)
@@ -456,7 +456,7 @@ def test_cached_batches_keep_global_worker_tenants_separate(system, monkeypatch)
 def test_cached_batch_preserves_late_risk_wakeups(system, monkeypatch):
     configure(system, selection_policy="risk_budget", investigation_percent="100")
     tenant = system.tenant["id"]
-    system.db.execute("INSERT INTO tenant_telemetry_retention(tenant_id,mode) VALUES($1,'90')", tenant)
+    system.db.execute("INSERT INTO tenant_telemetry_retention(tenant_id,mode) VALUES($1,'90') ON CONFLICT(tenant_id) DO UPDATE SET mode=EXCLUDED.mode", tenant)
     targets = [captured(system, (80, 80)), captured(system, (85, 85))]
     for value in targets:
         finalize(system, value)
@@ -496,7 +496,7 @@ def test_cached_batch_preserves_late_risk_wakeups(system, monkeypatch):
 def test_cached_batch_isolates_a_revoked_sensor_with_a_savepoint(system, monkeypatch):
     configure(system, selection_policy="risk_budget", investigation_percent="100")
     tenant = system.tenant["id"]
-    system.db.execute("INSERT INTO tenant_telemetry_retention(tenant_id,mode) VALUES($1,'90')", tenant)
+    system.db.execute("INSERT INTO tenant_telemetry_retention(tenant_id,mode) VALUES($1,'90') ON CONFLICT(tenant_id) DO UPDATE SET mode=EXCLUDED.mode", tenant)
     revoked, allowed = captured(system, (96,)), captured(system, (97,), device="peer_sensor")
     for value in (revoked, allowed):
         finalize(system, value)
@@ -529,7 +529,7 @@ def test_exhausted_batch_budget_preserves_individual_progress(system, monkeypatc
 
     configure(system, selection_policy="risk_budget", investigation_percent="100")
     tenant = system.tenant["id"]
-    system.db.execute("INSERT INTO tenant_telemetry_retention(tenant_id,mode) VALUES($1,'90')", tenant)
+    system.db.execute("INSERT INTO tenant_telemetry_retention(tenant_id,mode) VALUES($1,'90') ON CONFLICT(tenant_id) DO UPDATE SET mode=EXCLUDED.mode", tenant)
     targets = [captured(system, (96,)), captured(system, (97,))]
     for value in targets:
         finalize(system, value)

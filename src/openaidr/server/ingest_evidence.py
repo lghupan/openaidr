@@ -162,9 +162,8 @@ def cleanup(st, tenant, conn):
     return st.execute("""DELETE FROM retained_ingest_evidence WHERE id IN (
         SELECT e.id FROM retained_ingest_evidence e JOIN tenant_telemetry_retention r USING(tenant_id)
         WHERE e.tenant_id=$1 AND (
-            (r.mode IN ('7','30','90') AND e.received_at<clock_timestamp()-
-                (CASE WHEN r.mode IN ('7','30','90') THEN r.mode::int ELSE 0 END)*interval '1 day')
-            OR (r.cleanup_threshold_percent IS NOT NULL
-                AND (e.received_at AT TIME ZONE 'UTC')::date<=r.last_deleted_day))
+            (r.mode IN ('7','30','90') AND (e.received_at AT TIME ZONE 'UTC')::date<
+                (clock_timestamp() AT TIME ZONE 'UTC')::date-(CASE WHEN r.mode IN ('7','30','90') THEN r.mode::int ELSE 0 END))
+            OR ((e.received_at AT TIME ZONE 'UTC')::date<=r.last_deleted_day))
         ORDER BY e.received_at,e.id LIMIT 10)
         """, tenant, conn=conn)

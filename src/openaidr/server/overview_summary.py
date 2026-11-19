@@ -281,7 +281,7 @@ class OverviewSummary:
             failed = False
         finally:
             call.finish(failed)
-        self._save(key, result)
+        require(self._save(key, result), 'Summary sources changed; generate a new summary', 409)
         return result
 
     def _save(self, key, result, *, conn=None):

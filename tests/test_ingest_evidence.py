@@ -123,7 +123,7 @@ def test_retained_evidence_obeys_tenant_retention(db):
     cfg = SimpleNamespace(tenant_id=own["id"], telemetry_retention_disk_path="", host_metrics_path="")
     telemetry_retention.tick(db, cfg)
     assert db.scalar("SELECT count(*) FROM retained_ingest_evidence") == 2
-    telemetry_retention.save_settings(db, own["id"], {"mode": "7", "version": 0}, {}, cfg)
+    telemetry_retention.save_settings(db, own["id"], {"mode": "7", "version": 1}, {}, cfg)
     telemetry_retention.tick(db, cfg)
     assert db.scalar("SELECT count(*) FROM retained_ingest_evidence") == 1
     assert db.scalar("SELECT tenant_id FROM retained_ingest_evidence") == other["id"]
@@ -137,7 +137,9 @@ def test_pressure_retention_uses_utc_days_in_any_session_timezone(db, zone):
     for row, stamp in zip(rows, ("2026-10-11T23:30:00Z", "2026-10-12T00:30:00Z")):
         db.execute("UPDATE retained_ingest_evidence SET received_at=$2::timestamptz WHERE id=$1", row["id"], stamp)
     db.execute("""INSERT INTO tenant_telemetry_retention
-        (tenant_id,mode,cleanup_threshold_percent,last_deleted_day) VALUES($1,'unlimited',80,'2026-10-11')""", own["id"])
+        (tenant_id,mode,cleanup_threshold_percent,last_deleted_day) VALUES($1,'unlimited',80,'2026-10-11')
+        ON CONFLICT(tenant_id) DO UPDATE SET mode=EXCLUDED.mode,
+            cleanup_threshold_percent=EXCLUDED.cleanup_threshold_percent,last_deleted_day=EXCLUDED.last_deleted_day""", own["id"])
     with db.transaction() as conn:
         db.scalar("SELECT set_config('TimeZone',$1,true)", zone, conn=conn)
         assert evidence.cleanup(db, own["id"], conn) == 1
@@ -145,7 +147,7 @@ def test_pressure_retention_uses_utc_days_in_any_session_timezone(db, zone):
 
 
 def test_locked_evidence_cleanup_does_not_block_telemetry_retirement(db):
-    from test_telemetry_retention import seed
+    from retention_fixtures import seed
 
     own = tenant(db)
     device = sensor(db, own["id"])[0]
@@ -153,7 +155,7 @@ def test_locked_evidence_cleanup_does_not_block_telemetry_retirement(db):
     db.execute("UPDATE retained_ingest_evidence SET received_at=now()-interval '8 days'")
     event_id, day = seed(db, device, 8)
     cfg = SimpleNamespace(tenant_id=own["id"], telemetry_retention_disk_path="", host_metrics_path="")
-    telemetry_retention.save_settings(db, own["id"], {"mode": "7", "version": 0}, {}, cfg)
+    telemetry_retention.save_settings(db, own["id"], {"mode": "7", "version": 1}, {}, cfg)
     with db.transaction() as blocker:
         db.execute("SELECT id FROM retained_ingest_evidence WHERE id=$1 FOR UPDATE", row["id"], conn=blocker)
         telemetry_retention.tick(db, cfg)

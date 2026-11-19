@@ -263,7 +263,7 @@ def finalize(st, tenant_id, session_id, *, scheduling_enabled=False, worker_read
                       or (protocol_version == 1 and supported_models is not None and settings["model"] not in supported_models)):
                     routing.update(status="waiting_worker", reason="worker_unavailable")
                 else:
-                    job = st.one(
+                    jobs = st.many(
                         """INSERT INTO session_investigation_jobs(id,tenant_id,sensor_id,session_id,snapshot_id,owner_user_id,
                                   detector_config_version,settings_version,configuration,routing_reason,protocol_version)
                            VALUES($1,$2,$3,$4,$5,$10,$6,$7,$8,$9,$11)
@@ -274,8 +274,12 @@ def finalize(st, tenant_id, session_id, *, scheduling_enabled=False, worker_read
                         Jsonb({**aggregation._stored(settings), "history_owner_user_id": session.get("owner_user_id")}),
                         reason, session.get("owner_user_id"), protocol_version, conn=conn,
                     )
-                    aggregation.require(job["protocol_version"] == protocol_version, "retained investigation contract conflict", 409)
-                    routing.update(status=job["state"], reason=reason, job_id=job["id"])
+                    if jobs:
+                        job = jobs[0]
+                        aggregation.require(job["protocol_version"] == protocol_version, "retained investigation contract conflict", 409)
+                        routing.update(status=job["state"], reason=reason, job_id=job["id"])
+                    else:
+                        routing.update(status='erased', reason='data_deleted')
                 if routing["status"] in ("disabled", "waiting_worker"):
                     next_at = now + timedelta(seconds=30)
                     state["next_evaluation_at"] = next_at.isoformat()

@@ -2636,9 +2636,6 @@ def create_app(cfg, st, *, customer=False):
                     )
                 if ticks % 12 == 0 and cfg.enabled("api"):
                     await run_in_threadpool(prune, st, cfg.tenant_id or None)
-                    from .telemetry_retention import tick
-
-                    await run_in_threadpool(tick, st, cfg)
             except Exception:
                 log.exception("background service failed")
             ticks += 1
@@ -2688,23 +2685,8 @@ def create_app(cfg, st, *, customer=False):
                 pass
 
     async def retire_telemetry_keys(stop):
-        from .telemetry_retention import cleanup_keys
-        from .gateways import cleanup as cleanup_gateways
-
-        while not stop.is_set():
-            worked = False
-            try:
-                worked = await run_in_threadpool(cleanup_keys, st, cfg)
-                worked = await run_in_threadpool(cleanup_gateways, st, cfg) or worked
-            except Exception:
-                log.warning("Telemetry identity cleanup deferred")
-            try:
-                await asyncio.wait_for(stop.wait(), timeout=0.1 if worked else 60)
-            except TimeoutError:
-                pass
-
-
-
+        from .raw_retention import worker
+        await worker(st, cfg, stop)
 
     async def project_costs(stop):
         from .agent_cost_usage import process_pending

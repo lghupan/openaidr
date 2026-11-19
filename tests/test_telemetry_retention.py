@@ -12,6 +12,7 @@ from test_hook_policy import system as system, browser
 from test_telemetry_partitions import database as database
 from test_store import db as db
 from test_inline_guardrail import system as inline_system
+from retention_fixtures import seed
 
 
 def config(st, tenant='', path=''):
@@ -21,18 +22,6 @@ def config(st, tenant='', path=''):
 def policy(st, tenant, cfg, mode='7', **options):
     current = retention.get_settings(st, tenant, cfg)
     return retention.save_settings(st, tenant, {'mode': mode, 'version': current['version'], **options}, {}, cfg)
-
-
-def seed(st, sensor, age, *, pending=False):
-    day = now().date() - timedelta(days=age)
-    st.execute('SELECT ensure_telemetry_partitions($1,$2)', sensor['tenant_id'], day)
-    stamp = now() - timedelta(days=age)
-    ident = new_id()
-    st.execute('''INSERT INTO events(id,tenant_id,sensor_id,time,kind,product,body,storage_day,received_at,risk)
-        VALUES($1,$2,$3,$4,'sensor','',$5,$6,$4,$7)''', ident, sensor['tenant_id'], sensor['id'], stamp,
-        Jsonb({'id': ident, 'kind': 'sensor'}), day, Jsonb({'status': 'pending' if pending else 'scored'}))
-    st.set_detect_cursor(sensor['tenant_id'], {'time': now(), 'id': 'ffffffff-ffff-ffff-ffff-ffffffffffff'})
-    return ident, day
 
 
 def sample(path, used, *, age=0, total=1000, root_used=None):
@@ -58,7 +47,8 @@ def test_retention_http_permissions_versions_and_explicit_opt_in(system):
     path = 'settings/telemetry-retention'
     current = browser(system, 'GET', path)
     assert current.status_code == 200 and current.headers['cache-control'] == 'no-store'
-    assert current.json()['mode'] is None
+    assert current.json()['mode'] == '30'
+    system.db.execute('DELETE FROM tenant_telemetry_retention WHERE tenant_id=$1', system.tenant['id'])
     assert current.json()['cleanup_threshold_percent'] is None
     assert browser(system, 'PUT', path, {'mode': '7', 'version': 0}, user='viewer').status_code == 403
     assert system.client.put('/api/v1/' + path, json={'mode': '7', 'version': 0}, headers={'X-OpenAIDR-CSRF': '1'}).status_code == 401
@@ -82,13 +72,15 @@ def test_retention_http_permissions_versions_and_explicit_opt_in(system):
         assert saved.status_code == 200 and saved.json()['mode'] == mode
         assert saved.json()['cleanup_threshold_percent'] is None
     assert browser(system, 'PUT', path, {'mode': '7', 'version': 0}).status_code == 409
-    assert browser(system, 'GET', path, user='foreign').json()['mode'] is None
+    assert browser(system, 'GET', path, user='foreign').json()['mode'] == '30'
     assert system.db.scalar("SELECT count(*) FROM audit_log WHERE action='telemetry.retention.configure'") == 4
 
 
 def test_retention_controls_migration_preserves_existing_policies(database):
     st, sensor = database
     tenant = sensor['tenant_id']
+    st.execute('DROP TRIGGER tenant_default_raw_retention ON tenants')
+    st.execute('DELETE FROM tenant_telemetry_retention')
     st.execute('ALTER TABLE tenant_telemetry_retention DROP COLUMN cleanup_threshold_percent')
     st.execute('DELETE FROM schema_migrations WHERE version=57')
     for mode in ('7', '30', '90', 'automatic'):
