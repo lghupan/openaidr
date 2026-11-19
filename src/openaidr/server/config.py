@@ -22,6 +22,7 @@ ALL_SERVICES = ("ingest", "api", "detect") + (("admin",) if PLATFORM_AVAILABLE e
 @dataclass
 class Config:
     database_url: str = ""
+    deletion_register_url: str = field(default="", repr=False)
     listen: str = ":8080"
     services: dict = field(default_factory=lambda: dict.fromkeys(ALL_SERVICES, True))
     public_url: str = "http://localhost:8080"
@@ -240,6 +241,8 @@ class Config:
                 )
         if not self.database_url:
             raise ValueError("OPENAIDR_DATABASE_URL is required")
+        if self.deletion_register_url and not self.tenant_id:
+            raise ValueError("Deletion authority requires OPENAIDR_TENANT_ID")
         for name in self.services:
             if name not in ALL_SERVICES:
                 raise ValueError(
@@ -274,6 +277,7 @@ def from_env():
         raise ValueError("Cloud services require the private platform package")
     config = Config(
         database_url=env("DATABASE_URL"),
+        deletion_register_url=env("DELETION_REGISTER_URL"),
         listen=env("LISTEN", ":8080"),
         public_url=env("PUBLIC_URL", "http://localhost:8080").rstrip("/"),
         admin_public_url=env("ADMIN_PUBLIC_URL").rstrip("/"),

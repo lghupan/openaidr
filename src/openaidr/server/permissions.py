@@ -49,6 +49,8 @@ def has_role(user, role):
 # Full matches keep adjacent paths and new endpoints denied until classified.
 # Personal session flows retain their separate ownership checks in the handler.
 ACCESS = (
+    (("it_admin",), "GET POST", r"data-deletions"),
+    (("it_admin",), "POST", r"data-deletions/preview"),
     (("it_admin",), "GET POST", r"settings/cowork"),
     (("it_admin",), "DELETE", r"settings/cowork/[^/]+"),
     (ROLES, "GET", r"gateways/overview"),

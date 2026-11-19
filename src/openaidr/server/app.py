@@ -918,6 +918,8 @@ class Service:
         limit = (
             7 << 20
             if path == "knowledge/uploads"
+            else 16 << 10
+            if path in ('data-deletions', 'data-deletions/preview')
             else 1 << 20
             if path in ("response/policy", "response/company-policy")
             else 256 << 10
@@ -931,6 +933,19 @@ class Service:
             else 4 << 10
         )
         data = body(request, limit) if method in ("POST", "PUT", "PATCH") else {}
+        if path in ("data-deletions", "data-deletions/preview"):
+            from . import data_lifecycle
+            require(bool(self.cfg.deletion_register_url), 'Deletion authority is not configured', 503)
+            if path.endswith('/preview'):
+                require(set(data) == {'kind', 'ids'}, 'kind and ids are required')
+                result = data_lifecycle.preview(st, tenant, data['kind'], data['ids'])
+            elif method == 'GET':
+                result = {'requests': data_lifecycle.authority(st, self.cfg).requests(tenant)}
+            else:
+                result = data_lifecycle.request(st, self.cfg, tenant, data, actor)
+            reply = response(result)
+            reply.headers['Cache-Control'] = 'no-store'
+            return reply
         if path == "settings/cowork" or path.startswith("settings/cowork/"):
             from . import cowork
 
@@ -2709,6 +2724,10 @@ def create_app(cfg, st, *, customer=False):
 
     @asynccontextmanager
     async def lifespan(app):
+        if cfg.deletion_register_url:
+            from .data_lifecycle import replay
+            # Runs before any worker, listener readiness or external publication.
+            await run_in_threadpool(partial(replay, st, cfg, restore=True))
         risk_stop = asyncio.Event()
         cleanup = AsyncExitStack()
         cleanup.callback(dashboard_mcp.close)
