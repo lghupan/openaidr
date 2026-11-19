@@ -91,7 +91,7 @@ def event(application, ident, when, attrs, effort, catalog=None):
     key = hashlib.sha256(json.dumps([application, ident], sort_keys=True).encode()).hexdigest()
     return dict(key="history:" + key, time=when, name=application + ".api_request",
                 model=text(attrs, "model") or "Unattributed", reasoning_effort=effort or "unknown",
-                usage=measured)
+                attributes={"service_tier": text(attrs, "service_tier")}, usage=measured)
 
 
 def claude(record):
@@ -103,13 +103,17 @@ def claude(record):
     ident = text(message, "id") or text(record, "requestId")
     if not isinstance(counts, dict) or not when or not ident:
         return None
-    attrs = dict(model=text(message, "model"), input_tokens=counts.get("input_tokens"),
+    attrs = dict(model=text(message, "model"), service_tier=text(counts, "service_tier"),
+                 input_tokens=counts.get("input_tokens"),
                  output_tokens=counts.get("output_tokens"),
                  cache_read_tokens=counts.get("cache_read_input_tokens", 0),
                  cache_creation_tokens=counts.get("cache_creation_input_tokens", 0))
     result = event("claude_code", ident, when, attrs, reasoning_effort(record))
     if result is not None:
         result["usage"]["cost"] = claude_cost(attrs, counts)
+        cache = counts.get("cache_creation") or {}
+        if isinstance(cache, dict):
+            result["attributes"]["hour_writes"] = token(cache, "ephemeral_1h_input_tokens", optional=True) or 0
     return result
 
 
@@ -361,22 +365,28 @@ def metadata(item):
 
 
 def staged_events(rows):
-    for key, application, when, model, effort, tokens, cached, incoming, outgoing, cost in rows:
+    for key, application, when, model, effort, tokens, cached, incoming, outgoing, cost, *pricing in rows:
+        # Previously saved request-link checkpoints contain only the first ten fields.
+        written, tier, hour_writes = pricing or (0, "", 0)
         yield dict(key=key, name=application + ".api_request", time=datetime.fromtimestamp(when, timezone.utc),
-                   model=model, reasoning_effort=effort, usage=dict(tokens=tokens, cache_read_tokens=cached,
-                   input_tokens=incoming, cache_write_tokens=0, output_tokens=outgoing, cost=cost))
+                   model=model, reasoning_effort=effort, attributes={"service_tier": tier, "hour_writes": hour_writes},
+                   usage=dict(tokens=tokens, cache_read_tokens=cached, input_tokens=incoming - written,
+                              cache_write_tokens=written, output_tokens=outgoing, cost=cost))
 
 
 def stage(db, events):
-    db.executemany("""INSERT INTO history VALUES (?,?,?,?,?,?,?,?,?,?)
+    db.executemany("""INSERT INTO history VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(event_key) DO UPDATE SET
             application=excluded.application,happened_at=excluded.happened_at,
             model=excluded.model,effort=excluded.effort,tokens=excluded.tokens,
-            cached=excluded.cached,incoming=excluded.incoming,outgoing=excluded.outgoing,cost=excluded.cost
+            cached=excluded.cached,incoming=excluded.incoming,outgoing=excluded.outgoing,cost=excluded.cost,
+            written=excluded.written,tier=excluded.tier,hour_writes=excluded.hour_writes
         WHERE excluded.tokens>tokens OR (cost IS NULL AND excluded.cost IS NOT NULL
             AND happened_at=excluded.happened_at AND model=excluded.model AND effort=excluded.effort
             AND tokens=excluded.tokens AND cached=excluded.cached
-            AND incoming=excluded.incoming AND outgoing=excluded.outgoing)""", map(metadata, events))
+            AND incoming=excluded.incoming AND outgoing=excluded.outgoing)""",
+        ((*metadata(item), item["usage"]["cache_write_tokens"], text(item.get("attributes", {}), "service_tier"),
+          item.get("attributes", {}).get("hour_writes", 0)) for item in events))
 
 
 def history_once(config, queue, stop, paused=lambda: False):
@@ -424,7 +434,7 @@ def history_once(config, queue, stop, paused=lambda: False):
         history.execute("""CREATE TABLE history (
             event_key TEXT PRIMARY KEY, application TEXT, happened_at REAL,
             model TEXT, effort TEXT, tokens INTEGER, cached INTEGER,
-            incoming INTEGER, outgoing INTEGER, cost REAL)""")
+            incoming INTEGER, outgoing INTEGER, cost REAL, written INTEGER, tier TEXT, hour_writes INTEGER)""")
 
         def flush(application, batch):
             stage(history, batch)
@@ -533,8 +543,6 @@ def request_record(record, application, state, cutoff, sensor_id="", catalog=Non
     key = hashlib.sha256(json.dumps((application, ident)).encode()).hexdigest()
     if item is not None:
         item["key"] = key
-        item["attributes"] = {"service_tier": state.get("tier", "") if application == "codex"
-                              else text((record.get("message") or {}).get("usage") or {}, "service_tier")}
     return key, item, int(item is None), 0
 
 
@@ -638,9 +646,8 @@ def requests_once(config, queue, stop, paused=lambda: False):
     with closing(sqlite3.connect("")) as staged:
         staged.execute("""CREATE TABLE history (event_key TEXT PRIMARY KEY, application TEXT,
             happened_at REAL,model TEXT,effort TEXT,tokens INTEGER,cached INTEGER,incoming INTEGER,
-            outgoing INTEGER,cost REAL)""")
+            outgoing INTEGER,cost REAL,written INTEGER,tier TEXT,hour_writes INTEGER)""")
         staged.execute("CREATE TABLE proof (application TEXT,event_key TEXT,PRIMARY KEY(application,event_key))")
-        staged.execute("CREATE TABLE tiers (event_key TEXT PRIMARY KEY,service_tier TEXT)")
         staged.execute("CREATE TABLE aliases (application TEXT,event_key TEXT,legacy_key TEXT,accounting TEXT,tier TEXT,partial INTEGER,PRIMARY KEY(event_key,legacy_key))")
 
         def bind_aliases():
@@ -657,11 +664,6 @@ def requests_once(config, queue, stop, paused=lambda: False):
                     for app, events in linked.items():
                         usage_recovery.recover(queue.db, queue.usage_scope, app, events)
             staged.execute("DELETE FROM aliases")
-
-        def save(batch):
-            stage(staged, batch)
-            staged.executemany("INSERT OR REPLACE INTO tiers VALUES (?,?)", [
-                (item["key"], text(item.get("attributes", {}), "service_tier")) for item in batch])
 
         def scan(path, app, previous, stat=None, reset=False):
             if app == "workbuddy":
@@ -727,11 +729,11 @@ def requests_once(config, queue, stop, paused=lambda: False):
                         staged.executemany("INSERT OR IGNORE INTO proof VALUES (?,?)", proof)
                         proof.clear()
                     if len(batch) >= BATCH_SIZE:
-                        save(batch)
+                        stage(staged, batch)
                         batch.clear()
                 source.seek(max(0, offset - 4096))
                 anchor = hashlib.sha256(source.read(min(offset, 4096))).hexdigest()
-            save(batch)
+            stage(staged, batch)
             staged.executemany("INSERT OR IGNORE INTO proof VALUES (?,?)", proof)
             if "pending" in state:
                 state["pending"] = [entry for entry in state["pending"] if entry["event"][2] >= since]
@@ -858,9 +860,6 @@ def requests_once(config, queue, stop, paused=lambda: False):
                         with queue.lock, queue.db:
                             queue.db.execute("BEGIN IMMEDIATE")
                             events = list(staged_events(rows))
-                            for item in events:
-                                tier = staged.execute("SELECT service_tier FROM tiers WHERE event_key=?", (item["key"],)).fetchone()
-                                item["attributes"] = {"service_tier": tier[0] if tier else ""}
                             result = usage_recovery.recover(queue.db, queue.usage_scope, app, events)
                         if result is None:
                             permitted = False

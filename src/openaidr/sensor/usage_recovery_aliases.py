@@ -44,6 +44,7 @@ def bind(db, scope, application, item, legacy_key, *, partial=False):
                                    input_tokens=old["uncached_input_tokens"], cache_write_tokens=0,
                                    output_tokens=old["output_tokens"]))
             usage.record_calls(db, old["scope"], [preserved])
+            db.execute("UPDATE usage_price_inputs SET event_key=? WHERE event_key=?", (key, legacy_key))
             db.execute("INSERT INTO usage_sources VALUES (?,?,'legacy',?)", (key, application, when))
             db.execute("INSERT INTO usage_recovered VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                        (key, application, when, old["model"], old["effort"], old["tokens"],

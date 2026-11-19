@@ -1,6 +1,6 @@
 import { agentIcon } from '../../../packages/ui/agent-icons/index.js';
 
-type Counts = {tokens:number; calls:number; priced_calls:number; cost_usd:number|null;
+type Counts = {tokens:number; calls:number; priced_calls:number; estimated_calls?:number; cost_usd:number|null;
   cached_input_tokens?:number; uncached_input_tokens?:number; output_tokens?:number};
 type Row = Counts & {name:string};
 type Breakdown = Counts & {application:string; model:string; reasoning_effort:string};
@@ -82,6 +82,7 @@ export function initUsage(request:(action:string, params?:Record<string,unknown>
         <div id="usage-axis" class="usage-axis"></div>
         <dl class="usage-metrics"><div><dt id="usage-average-label">Daily average</dt><dd id="usage-average"></dd></div><div><dt id="usage-peak-label">Peak day</dt><dd id="usage-peak"></dd></div><div><dt id="usage-current-label">Today</dt><dd id="usage-current"></dd></div></dl>
         <p id="usage-coverage" hidden></p>
+        <details id="usage-details" hidden><summary>Usage details</summary><p id="usage-detail-text"></p></details>
       </section>
       <div class="usage-breakdowns"><section class="usage-card"><div class="usage-chart-heading"><h2>Models</h2><span>Est. cost</span></div><div id="usage-models" class="usage-rows"></div></section>
         <section class="usage-card"><div class="usage-chart-heading"><h2>Reasoning effort</h2><span>Est. cost</span></div><div id="usage-efforts" class="usage-rows"></div></section></div>
@@ -337,11 +338,22 @@ export function initUsage(request:(action:string, params?:Record<string,unknown>
       if (recovery.unreconciled_records) recoveryNotes.push('Some older history could not be updated.');
       if (recovery.pending_files) recoveryNotes.push('Waiting for history files to finish writing.');
     }
-    const coverage = [costCoverage(data.summary), data.breakdown?.some(row => row.application === 'unknown')
-      ? 'Unattributed usage has no recorded app identity. Older sensor versions did not retain it.' : '',
-      ...recoveryNotes].filter(Boolean).join(' ');
+    const {calls, priced_calls:priced, estimated_calls:estimated = 0} = data.summary;
+    const coverage = [
+      estimated ? `${estimated.toLocaleString('en-US')} ${estimated === 1 ? 'call' : 'calls'} estimated at current rates.` : '',
+      priced < calls ? `Cost covers ${priced.toLocaleString('en-US')} of ${calls.toLocaleString('en-US')} calls.` : '',
+    ].filter(Boolean).join(' ');
     text('coverage', coverage);
     node('coverage').hidden = !coverage;
+    const details = [
+      estimated ? 'Current model rates apply when a call has no recorded cost. Missing service tiers use standard pricing. Older input totals can include cache writes at the input rate.' : '',
+      costCoverage(data.summary),
+      data.breakdown?.some(row => row.application === 'unknown')
+        ? 'Unattributed usage has no recorded app identity. Older sensor versions did not retain it.' : '',
+      ...recoveryNotes,
+    ].filter(Boolean).join(' ');
+    text('detail-text', details);
+    node('details').hidden = !details;
     text('range', hourly ? 'Last 24 hours' : 'Last 30 days');
     text('chart-title', hourly ? 'Hourly estimated cost' : 'Daily estimated cost');
     node('chart').setAttribute('aria-label', `${hourly ? 'Hourly' : 'Daily'} estimated cost in USD`);

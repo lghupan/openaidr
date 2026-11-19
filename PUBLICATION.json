@@ -268,6 +268,26 @@
         "src/openaidr/sensor/usage_import.py",
         "tests/test_local_usage.py"
       ]
+    },
+    {
+      "source_repository": "opensecurainc/openaidr-internal",
+      "source_commit": "7c652a35f8194d3b9efcf70c8e8e46529f0c72d1",
+      "source_base_commit": "6465477508cb98fbf861cd678eae9d8753e8959a",
+      "target_base_commit": "64132ed22361ac754f14105ac5c0276d1e2b4856",
+      "paths": [
+        "apps/desktop/CHANGELOG.md",
+        "apps/desktop/README.md",
+        "apps/desktop/docs/usage-estimates.png",
+        "apps/desktop/src/style.css",
+        "apps/desktop/src/usage.ts",
+        "apps/desktop/tests/enrollment.spec.ts",
+        "src/openaidr/sensor/model_pricing.py",
+        "src/openaidr/sensor/usage.py",
+        "src/openaidr/sensor/usage_estimates.py",
+        "src/openaidr/sensor/usage_import.py",
+        "src/openaidr/sensor/usage_recovery_aliases.py",
+        "tests/test_local_usage.py"
+      ]
     }
   ]
 }
