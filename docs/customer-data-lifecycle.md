@@ -93,6 +93,40 @@ unset until that separate verification is integrated; do not report a request
 as fully complete from `applied_at` alone. Previously delivered customer-owned
 exports cannot be remotely retracted by this backend.
 
+## Dedicated tenant offboarding
+
+A minimal local receipt (request/tenant UUIDs and plan digest) commits atomically
+with schema erasure. Retry acknowledgement requires the recorded database name
+and this receipt; an absent schema alone is not evidence of erasure. This metadata
+is retained as deletion evidence and contains no customer payload.
+
+Offboarding is an offline operator action, not an account-settings HTTP call.
+Stop ingress, publishers and workers first. Withdraw shared feedback and arrange
+processor deletion before removing the credentials required for those calls.
+Keep any narrow legally required records in a separately authorized system;
+this command has no implicit billing/email retention exception.
+
+```sh
+python -m openaidr.server.lifecycle_cli offboard
+# Review the exact tenant/database/schema/table inventory and its digest.
+python -m openaidr.server.lifecycle_cli offboard --execute \
+  --sha256 <digest-from-check> --request-id <new-uuid>
+```
+
+The command requires exactly the bound tenant in a dedicated database/schema.
+It records an irreversible offboarding fence first, then atomically drops the
+customer schema, including account identities, credentials, billing, credit,
+audit payloads and tables without tenant foreign keys. It refuses shared or
+unexpected data schemas. Reuse the request ID and digest after failure. A crash
+after the schema drop can be acknowledged without recreating the tenant.
+
+The result remains `primary_deleted` while infrastructure cleanup is pending.
+Delete the retired cell's disks, retained GCS object generations and snapshots,
+host restore/adoption dumps, worker archives and processor copies. Private
+control-plane identities, billing and provisioning records live outside this
+public backend repository: their operator workflow must purge them or document
+a precise authorized exception. UUID-only erasure authority remains separate.
+
 ## Restore gate
 
 Keep ingress and workers stopped after database restore/WAL replay. Run the

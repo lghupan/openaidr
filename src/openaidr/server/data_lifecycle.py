@@ -220,3 +220,77 @@ def register_tenant(st, cfg):
         register = authority(st, cfg)
         with register.locked(tenant) as (remote, _):
             register.raw_deleted(remote, tenant, day)
+
+
+def offboard_plan(st, cfg, conn=None):
+    """Offline only: erase a dedicated DB, including non-FK/global identities.
+
+    Shared databases deliberately fail closed. They require a separate reviewed
+    per-account erasure workflow; a generic FK traversal cannot safely guess it.
+    """
+    tenant = cfg.tenant_id
+    if not tenant or not st.scalar('SELECT count(*)=1 AND bool_and(id=$1) FROM tenants', tenant, conn=conn):
+        raise ValueError('Offboarding requires exactly the bound tenant in a dedicated database')
+    if st.scalar('SELECT EXISTS(SELECT 1 FROM platform_admins) OR EXISTS(SELECT 1 FROM cloud_deployments)', conn=conn):
+        raise ValueError('Shared control-plane records require scoped platform erasure')
+    info = st.one('SELECT current_database() AS database,current_schema() AS schema', conn=conn)
+    if info['schema'] == 'openaidr_erasure_receipts':
+        raise ValueError('Reserved erasure receipt schema cannot contain tenant data')
+    schemas = st.many('''SELECT DISTINCT n.nspname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+        WHERE c.relkind IN ('r','p','m','f') AND n.nspname NOT IN ('pg_catalog','information_schema')
+            AND n.nspname NOT LIKE 'pg_toast%' ''', conn=conn)
+    if {r['nspname'] for r in schemas} != {info['schema']}:
+        raise ValueError('Unexpected data schemas; offboarding requires an explicit inventory')
+    if st.scalar("SELECT EXISTS(SELECT 1 FROM pg_foreign_table) OR EXISTS(SELECT 1 FROM pg_largeobject_metadata)", conn=conn):
+        raise ValueError('Unmanaged remote/large-object storage requires explicit erasure')
+    tables = st.many('''SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+        WHERE n.nspname=current_schema() AND c.relkind IN ('r','p','m','f') ORDER BY c.relname''', conn=conn)
+    plan = dict(version=1, kind='tenant', tenant_id=tenant, **info, tables=[r['relname'] for r in tables],
+                external_copies='pending verification')
+    return {'plan': plan, 'sha256': digest(plan)}
+
+
+def offboard(st, cfg, expected_sha256, request_id):
+    register = authority(st, cfg)
+    tenant = cfg.tenant_id
+    with register.locked(tenant, active=False) as (remote, row):
+        if row['state'] in ('primary_deleted', 'complete'):
+            return dict(tenant_id=tenant, state=row['state'])
+        existing = remote.execute('SELECT plan,tenant_id FROM lifecycle_requests WHERE request_id=%s', (str(UUID(request_id)),)).fetchone()
+        if row['state'] == 'offboarding' and existing:
+            plan = existing['plan']
+            if str(existing['tenant_id']) != tenant or plan.get('kind') != 'tenant' or digest(plan) != expected_sha256:
+                raise ValueError('Offboarding retry does not match committed authority')
+            if st.scalar('SELECT current_database()') != plan['database']:
+                raise ValueError('Offboarding database identity differs from the recorded plan')
+            if st.scalar('SELECT to_regnamespace($1) IS NULL', plan['schema']):
+                if not st.scalar("SELECT to_regclass('openaidr_erasure_receipts.completed') IS NOT NULL") or not st.scalar(
+                    'SELECT EXISTS(SELECT 1 FROM openaidr_erasure_receipts.completed WHERE request_id=$1 AND tenant_id=$2 AND plan_sha256=$3)',
+                    request_id, tenant, expected_sha256):
+                    raise ValueError('Committed local erasure receipt required; keep offboarding pending')
+                # Crash between atomic DROP commit and external acknowledgment.
+                remote.execute("UPDATE lifecycle_tenants SET state='primary_deleted',revision=revision+1 WHERE tenant_id=%s", (tenant,))
+                remote.execute('UPDATE lifecycle_requests SET applied_at=clock_timestamp() WHERE request_id=%s', (request_id,))
+                return dict(tenant_id=tenant, state='primary_deleted', external_copies='pending verification')
+        plan = offboard_plan(st, cfg)['plan']
+        if digest(plan) != expected_sha256:
+            raise ValueError('Offboarding inventory changed; check again')
+        register.append(remote, tenant, str(UUID(request_id)), plan, 'operator')
+        remote.execute("UPDATE lifecycle_tenants SET state='offboarding',revision=revision+1 WHERE tenant_id=%s", (tenant,))
+        remote.commit()  # irrevocable restore fence BEFORE touching the tenant DB
+        with st.transaction() as conn:
+            st.execute("SET LOCAL lock_timeout='5s'; SET LOCAL statement_timeout='60s'", conn=conn)
+            st.execute('LOCK TABLE tenants IN ACCESS EXCLUSIVE MODE', conn=conn)
+            if digest(offboard_plan(st, cfg, conn)['plan']) != expected_sha256:
+                raise ValueError('Offboarding inventory changed; keep workloads stopped')
+            # One atomic removal includes users/emails, credits, audit payloads,
+            # partition leaves and content without tenant_id/FKs.
+            conn.execute(sql.SQL('DROP SCHEMA {} CASCADE').format(sql.Identifier(plan['schema'])))
+            # Commit proof with the DROP. An empty wrong DB or an old snapshot
+            # cannot acknowledge erasure merely because a schema is absent.
+            conn.execute('CREATE SCHEMA openaidr_erasure_receipts')
+            conn.execute('CREATE TABLE openaidr_erasure_receipts.completed (request_id uuid PRIMARY KEY,tenant_id uuid NOT NULL,plan_sha256 text NOT NULL)')
+            conn.execute('INSERT INTO openaidr_erasure_receipts.completed VALUES(%s,%s,%s)', (request_id,tenant,expected_sha256))
+        remote.execute("UPDATE lifecycle_tenants SET state='primary_deleted',revision=revision+1 WHERE tenant_id=%s", (tenant,))
+        remote.execute('UPDATE lifecycle_requests SET applied_at=clock_timestamp() WHERE request_id=%s', (request_id,))
+    return dict(tenant_id=tenant, state='primary_deleted', external_copies='pending verification')
