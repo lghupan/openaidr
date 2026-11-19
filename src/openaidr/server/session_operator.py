@@ -466,6 +466,8 @@ def read_snapshot(st, tenant_id, snapshot_id, limit=100, cursor=""):
             snapshot_id,
             conn=conn,
         )
+        require(not st.scalar('SELECT EXISTS(SELECT 1 FROM lifecycle_expired_snapshots WHERE snapshot_id=$1)',
+                              snapshot_id, conn=conn), 'Raw snapshot content has expired or was deleted', 410)
         after = _decode(cursor, scope, ordinal=True)
         page = """SELECT i.ordinal,i.kind,i.source_id,i.body FROM session_snapshot_items i
                   JOIN session_snapshots s ON s.id=i.snapshot_id

@@ -585,8 +585,9 @@ def cleanup(st, cfg):
             WHERE ($1::uuid IS NULL OR r.tenant_id=$1) AND r.status<>'pending'
                 AND NOT EXISTS(SELECT 1 FROM model_usage u WHERE u.tenant_id=r.tenant_id
                     AND u.gateway_request_id=r.id AND u.status='pending') AND (
-                (r.created_at<now()-(CASE WHEN t.mode IN ('7','30','90') THEN t.mode::int END)*interval '1 day')
-                OR (t.cleanup_threshold_percent IS NOT NULL AND t.last_deleted_day IS NOT NULL
+                ((r.created_at AT TIME ZONE 'UTC')::date<(now() AT TIME ZONE 'UTC')::date-
+                    (CASE WHEN t.mode IN ('7','30','90') THEN t.mode::int END))
+                OR (t.last_deleted_day IS NOT NULL
                     AND r.created_at<((t.last_deleted_day+1)::timestamp AT TIME ZONE 'UTC')))
             ORDER BY r.created_at LIMIT 200 FOR UPDATE OF r SKIP LOCKED)""", cfg.tenant_id or None, conn=conn)
         return bool(worked)

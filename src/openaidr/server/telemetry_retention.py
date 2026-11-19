@@ -39,6 +39,15 @@ def get_settings(st, tenant_id, cfg, conn=None):
 
 
 def save_settings(st, tenant_id, payload, actor, cfg):
+    if getattr(cfg, 'deletion_register_url', ''):
+        from .data_lifecycle import authority
+        register = authority(st, cfg)
+        with register.locked(tenant_id) as (remote, row):
+            return _save_settings(st, tenant_id, payload, actor, cfg, (register, remote, row))
+    return _save_settings(st, tenant_id, payload, actor, cfg)
+
+
+def _save_settings(st, tenant_id, payload, actor, cfg, authority=None):
     require(set(payload) in ({'mode', 'version'}, {'mode', 'version', 'cleanup_threshold_percent'}),
             'mode and version are required; cleanup_threshold_percent is optional')
     require(payload['mode'] in MODES, 'invalid telemetry retention mode')
@@ -54,6 +63,14 @@ def save_settings(st, tenant_id, payload, actor, cfg):
         require(previous['version'] == payload['version'], 'retention settings changed', 409)
         require(threshold is None or previous['automatic_available'],
                 'Automatic requires fresh measurements of a verified dedicated database disk', 409)
+        if authority:
+            register, remote, current = authority
+            require(current['policy'] == {k: previous[k] for k in ('mode','version','cleanup_threshold_percent')},
+                    'Retention authority changed; reconcile before editing', 409)
+            register.policy(remote, tenant_id, dict(mode=payload['mode'], version=previous['version'] + 1,
+                                                   cleanup_threshold_percent=threshold))
+            if payload['mode'] in ('7','30','90'):
+                register.raw_deleted(remote, tenant_id, (now() - timedelta(days=int(payload['mode']) + 1)).date())
         keep_feedback = (previous['cleanup_threshold_percent'] is not None and threshold is not None
                          and previous['status'] not in ('no_progress', 'disk_changed'))
         st.execute('''INSERT INTO tenant_telemetry_retention(tenant_id,mode,cleanup_threshold_percent) VALUES($1,$2,$3)
@@ -141,7 +158,18 @@ def cleanup_keys(st, cfg):
         return bool(_retire_keys(st, tenant, conn))
 
 
-def _drop(st, tenant, day, conn):
+def _drop(st, tenant, day, conn, record=None):
+    # Hosted upstream releases expose partition DDL through a reviewed helper
+    # rather than granting schema ownership to the application role.
+    if st.scalar("SELECT to_regprocedure('retire_telemetry_day(uuid,date,uuid)') IS NOT NULL", conn=conn):
+        if record:
+            record(tenant, day)
+        previous = st.scalar('SELECT last_deleted_day FROM tenant_telemetry_retention WHERE tenant_id=$1', tenant, conn=conn)
+        removed = st.scalar('SELECT retire_telemetry_day($1,$2,$3)', tenant, day, new_id(), conn=conn)
+        if removed:
+            st.execute('UPDATE tenant_telemetry_retention SET last_deleted_day=GREATEST(last_deleted_day,$2::date,$3::date) WHERE tenant_id=$1',
+                       tenant, previous, day, conn=conn)
+        return removed
     # Lock session identities first. Late observations, receipts, binding, and
     # finalization must serialize with the final safety check and removal.
     st.scalar('''SELECT count(*) FROM (SELECT s.id FROM agent_sessions s WHERE s.tenant_id=$1
@@ -182,11 +210,13 @@ def _drop(st, tenant, day, conn):
                 AND old.session_id=waiting.session_id))''', tenant, day, conn=conn)
     if pending:
         return False
+    if record:
+        record(tenant, day)
     for name in names:
         conn.execute(sql.SQL('DROP TABLE {}').format(sql.Identifier(name)))
     st.execute('UPDATE telemetry_partition_days SET retired_at=clock_timestamp() WHERE tenant_id=$1 AND storage_day=$2',
                tenant, day, conn=conn)
-    st.execute('''UPDATE tenant_telemetry_retention SET last_deleted_day=$2,last_cleanup_at=clock_timestamp()
+    st.execute('''UPDATE tenant_telemetry_retention SET last_deleted_day=GREATEST(last_deleted_day,$2),last_cleanup_at=clock_timestamp()
         WHERE tenant_id=$1''', tenant, day, conn=conn)
     st.execute('''INSERT INTO audit_log(id,tenant_id,actor_type,actor_id,actor_name,action,target_type,target_id,details)
         VALUES($1,$2,'system','','Retention worker','telemetry.retention.delete','telemetry',$2,$3)''',
@@ -239,12 +269,31 @@ def _cleanup_evidence(st, tenant):
         pass
 
 
-def tick(st, cfg):
+def tick(st, cfg, *, authority=None):
+    if getattr(cfg, 'deletion_register_url', '') and authority is None:
+        from .data_lifecycle import authority as get_authority
+        register = get_authority(st, cfg)
+        with register.locked(cfg.tenant_id) as (remote, row):
+            policy = row['policy']
+            st.execute('''UPDATE tenant_telemetry_retention SET mode=$2,version=$3,cleanup_threshold_percent=$4,
+                last_deleted_day=GREATEST(last_deleted_day,$5::date) WHERE tenant_id=$1''', cfg.tenant_id,
+                policy['mode'], policy['version'], policy['cleanup_threshold_percent'], row['raw_deleted_through'])
+            return _tick(st, cfg, lambda tenant, day: register.raw_deleted(remote, tenant, day))
+    record = (lambda tenant, day: authority[0].raw_deleted(authority[1], tenant, day)) if authority else None
+    return _tick(st, cfg, record, drain_empty=authority is not None)
+
+
+def _tick(st, cfg, record=None, *, drain_empty=False):
     # One day per tenant per pass bounds both deletion and DDL pressure.
     tenants = st.many('''SELECT tenant_id FROM tenant_telemetry_retention
         WHERE ($1::uuid IS NULL OR tenant_id=$1) ORDER BY checked_at NULLS FIRST,tenant_id LIMIT 10''', cfg.tenant_id or None)
     for item in tenants:
         tenant = item['tenant_id']
+        if record:
+            from .raw_retention import cutoff as raw_cutoff
+            before = raw_cutoff(st, tenant)
+            if before is not None:
+                record(tenant, before.date() - timedelta(days=1))
         _cleanup_evidence(st, tenant)
         try:
             with st.transaction() as raw:
@@ -254,22 +303,29 @@ def tick(st, cfg):
                     continue
                 row = st.one('SELECT * FROM tenant_telemetry_retention WHERE tenant_id=$1 FOR UPDATE', tenant, conn=conn)
                 automatic, sample, pressure_status = _pressure(st, tenant, row, cfg, conn)
-                if not automatic and row['mode'] in ('automatic', 'unlimited'):
+                if not automatic and row['mode'] in ('automatic', 'unlimited') and row['last_deleted_day'] is None:
                     _status(st, tenant, pressure_status or 'retained', conn)
                     continue
-                cutoff = now().date() if automatic else (now() - timedelta(days=int(row['mode']))).date()
+                cutoff = (now().date() if automatic else
+                          (now() - timedelta(days=int(row['mode']))).date() if row['mode'] in ('7','30','90') else
+                          row['last_deleted_day'] + timedelta(days=1))
+                if row['last_deleted_day'] is not None:
+                    cutoff = max(cutoff, row['last_deleted_day'] + timedelta(days=1))
                 query = '''SELECT storage_day FROM telemetry_partition_days d
                     WHERE tenant_id=$1 AND storage_day<$2 AND retired_at IS NULL
                     AND (NOT $3 OR EXISTS(SELECT 1 FROM events e WHERE e.tenant_id=$1 AND e.storage_day=d.storage_day)
                         OR EXISTS(SELECT 1 FROM telemetry_exports e WHERE e.tenant_id=$1 AND e.storage_day=d.storage_day))
                     AND ($4::date IS NULL OR storage_day>$4) ORDER BY storage_day LIMIT 16'''
-                days = st.many(query, tenant, cutoff, automatic, row['scan_after_day'], conn=conn)
+                # Restore drains empty expired partitions; live disk feedback
+                # must not restart its sample wait when no raw data was removed.
+                skip_empty = automatic or (not drain_empty and row['mode'] in ('automatic','unlimited'))
+                days = st.many(query, tenant, cutoff, skip_empty, row['scan_after_day'], conn=conn)
                 if not days and row['scan_after_day'] is not None:
-                    days = st.many(query, tenant, cutoff, automatic, None, conn=conn)
+                    days = st.many(query, tenant, cutoff, skip_empty, None, conn=conn)
                 status = 'no_eligible_data'
                 for candidate in days:
                     day = candidate['storage_day']
-                    if _drop(st, tenant, day, conn):
+                    if _drop(st, tenant, day, conn, record):
                         status = 'waiting_sample' if automatic else 'deleted'
                         if automatic:
                             st.execute('''UPDATE tenant_telemetry_retention SET sample_at=$2,sample_used_bytes=$3,
@@ -279,7 +335,7 @@ def tick(st, cfg):
                 st.execute('UPDATE tenant_telemetry_retention SET scan_after_day=$2 WHERE tenant_id=$1',
                            tenant, days[-1]['storage_day'] if days and status == 'processing' else None, conn=conn)
                 # Age expiry must not clear a disk-safety latch or a pending sample.
-                if pressure_status and pressure_status != 'healthy':
+                if pressure_status and (pressure_status != 'healthy' or row['mode'] in ('automatic','unlimited')):
                     status = pressure_status
                 _status(st, tenant, status, conn)
         except (psycopg.errors.LockNotAvailable, psycopg.errors.QueryCanceled, psycopg.errors.DeadlockDetected, TimeoutError):

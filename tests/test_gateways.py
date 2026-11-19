@@ -763,7 +763,7 @@ def test_unavailable_content_limits_filtering_and_retention(system):
     assert len(browser(s, "GET", "gateways/requests?gateway_id=" + gateway["id"] + "&status=unavailable&outcome=unconfirmed").json()["items"]) == 7
     s.db.execute("UPDATE gateway_requests SET created_at=now()-interval '8 days' WHERE tenant_id=$1", s.tenant["id"])
     assert gateways.cleanup(s.db, s.cfg) is False
-    s.db.execute("INSERT INTO tenant_telemetry_retention(tenant_id,mode) VALUES($1,'7')", s.tenant["id"])
+    s.db.execute("INSERT INTO tenant_telemetry_retention(tenant_id,mode) VALUES($1,'7') ON CONFLICT(tenant_id) DO UPDATE SET mode=EXCLUDED.mode", s.tenant["id"])
     assert gateways.cleanup(s.db, s.cfg) is True
     assert s.db.scalar("SELECT count(*) FROM gateway_requests WHERE tenant_id=$1", s.tenant["id"]) == 0
     s.db.execute("DELETE FROM gateway_instances WHERE id=$1", gateway["id"])

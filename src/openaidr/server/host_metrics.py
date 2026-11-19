@@ -8,6 +8,7 @@ import json
 import logging
 import math
 import os
+import posixpath
 from pathlib import Path
 import re
 import shlex
@@ -48,7 +49,8 @@ def valid_disk_path(value):
         isinstance(value, str)
         and len(value) <= 255
         and DISK_PATH.fullmatch(value) is not None
-        and os.path.normpath(value) == value
+        # Collector mount paths are Linux paths even when read on Windows.
+        and posixpath.normpath(value) == value
     )
 
 

@@ -1371,7 +1371,10 @@ def _route(
         protocol_version == 1 and supported_models is not None and settings["model"] not in supported_models
     ):
         return {**routing, "status": "waiting_worker", "reason": "worker_unavailable"}
-    row = st.one(
+    from .raw_retention import snapshot_erased
+    if snapshot_erased(st, registration['tenant_id'], state['snapshot_id'], conn):
+        return {**routing, 'status': 'erased', 'reason': 'data_deleted'}
+    rows = st.many(
         """INSERT INTO session_investigation_jobs(id,tenant_id,sensor_id,registration_id,owner_user_id,
                        snapshot_id,detector_config_version,settings_version,configuration,routing_reason,protocol_version)
                 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
@@ -1390,6 +1393,9 @@ def _route(
         protocol_version,
         conn=conn,
     )
+    if not rows:
+        return {**routing, 'status': 'erased', 'reason': 'data_deleted'}
+    row = rows[0]
     require(row["protocol_version"] == protocol_version, "retained investigation contract conflict", 409)
     return {
         **routing,
@@ -1759,6 +1765,8 @@ def read_snapshot(st, tenant_id, user_id, snapshot_id, limit=100, cursor=""):
             conn=conn,
         )
         _owner_registration(st, tenant_id, user_id, snapshot["registration_id"], conn)
+        require(not st.scalar('SELECT EXISTS(SELECT 1 FROM lifecycle_expired_snapshots WHERE snapshot_id=$1)',
+                              snapshot_id, conn=conn), 'Raw snapshot content has expired or was deleted', 410)
         page = """SELECT i.ordinal,i.kind,i.source_id,i.body FROM session_snapshot_items i
                          JOIN session_snapshots s ON s.id=i.snapshot_id
                          WHERE i.snapshot_id=$1 AND s.tenant_id=$2 AND s.owner_user_id=$3 AND i.ordinal>$4
