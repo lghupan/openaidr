@@ -7,4 +7,4 @@ Notes for published versions are attached to each
 
 ## Unreleased
 
-- Desktop Usage can estimate new Codex model costs using a daily LiteLLM pricing update. The sensor keeps the last pricing table for offline use.
+- Usage now estimates missing historical costs from current model rates and retained token counts. Pricing coverage stays visible, and history recovery details can be expanded.

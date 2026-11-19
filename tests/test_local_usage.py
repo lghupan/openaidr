@@ -1660,8 +1660,9 @@ def test_codex_catalog_refresh_and_offline_costs(tmp_path, monkeypatch):
         for item in events:
             telemetry.accept("logs", body(when, item), "application/json")
         summary = read(cfg, 1)["summary"]
-        assert (summary["calls"], summary["priced_calls"]) == (6, 4)
-        assert summary["cost_usd"] == pytest.approx(.50916 + .004 + .04)
+        assert (summary["calls"], summary["priced_calls"], summary["estimated_calls"]) == (6, 5, 1)
+        assert summary["cost_usd"] == pytest.approx(.50916 + .004 + .04 + .016)
+        assert catalog.quote("azure/" + model, "", (10, 0, 0, 1), {}, when) is NotImplemented
         catalog.refresh()
         assert requests[1].headers["If-None-Match"] == '"prices"'
         cached = catalog.path.read_bytes()
@@ -1686,4 +1687,101 @@ def test_codex_catalog_refresh_and_offline_costs(tmp_path, monkeypatch):
         offline.quote("gpt-new", "", (1, 0, 0, 0), {}, when)
         assert offline.due == offline.checked + model_pricing.HOUR + 1
     finally:
+        telemetry.close()
+
+
+def test_missing_prices_follow_current_catalog_per_request_through_compaction(tmp_path, clock, monkeypatch):
+    from openaidr.sensor import model_pricing
+
+    cfg = config(tmp_path)
+    queue = ExportQueue(Path(cfg["data_dir"]) / "telemetry.sqlite3", usage_scope=usage.identity(cfg))
+    reader = usage.UsageReader()
+    model = "exact-model"
+    when = clock.current - timedelta(days=2)
+    rates = dict(input_cost_per_token=.001, output_cost_per_token=.002,
+                 input_cost_per_token_priority=.003, output_cost_per_token_priority=.004,
+                 input_cost_per_token_above_1k_tokens=.01, output_cost_per_token_above_1k_tokens=.02)
+    feed = {model: dict(rates, litellm_provider="openai", mode="chat")}
+    cache = model_pricing.Catalog(cfg)
+    requests = []
+
+    def serve(request):
+        requests.append(request)
+        return httpx.Response(200, json=feed, headers={"ETag": '"new"'})
+
+    monkeypatch.setattr(model_pricing.network_proxy, "transport_options",
+                        lambda config, verify: {"transport": httpx.MockTransport(serve)})
+    try:
+        for ident, attrs in (("short", {}), ("priority", {"service_tier": "priority"}),
+                             ("long", {"input_token_count": 1500}), ("reported", {"cost_usd": .25}),
+                             ("free", {"cost_usd": 0}), ("absent", {"model": "another-model"}),
+                             ("unsupported", {"service_tier": "custom"})):
+            packet = body(when, event(ident, **{"model": model, **attrs}))
+            queue.confirm(queue.append("logs", packet, "application/json", 1))
+        assert usage.overview(cfg, 30, reader)["summary"]["priced_calls"] == 2
+        # Earlier installations have only direct OpenAI rates and their old ETag.
+        checked = time.time() - 60
+        cache.path.write_text(json.dumps(dict(models={model: [checked, rates]}, checked=checked, etag='"old"')))
+        cache = model_pricing.Catalog(cfg)
+        assert cache.due == 0
+        cache.refresh()
+        assert "If-None-Match" not in requests[0].headers
+        report = usage.overview(cfg, 30, reader)
+        summary = report["summary"]
+        assert (summary["calls"], summary["priced_calls"], summary["estimated_calls"]) == (7, 5, 3)
+        assert summary["cost_usd"] == pytest.approx(1.4 + 3.8 + 19 + .25)
+        # A reported zero arriving after the first read replaces the estimate.
+        queue.confirm(queue.append("logs", body(when, event("short", model=model, cost_usd=0)),
+                                   "application/json", 1))
+        before = usage.overview(cfg, 30, reader)
+        assert before["summary"]["estimated_calls"] == 2
+        assert before["summary"]["cost_usd"] == pytest.approx(3.8 + 19 + .25)
+        with queue.db:
+            usage._compact(queue.db, clock.current.timestamp(), 10)
+        assert usage.overview(cfg, 30, reader) == read(cfg) == before
+        feed[model]["input_cost_per_token_priority"] = .005
+        cache.refresh()
+        after = usage.overview(cfg, 30, reader)
+        assert after == read(cfg)
+        assert after["summary"]["cost_usd"] == pytest.approx(5.8 + 19 + .25)
+        assert (after["summary"]["calls"], after["summary"]["tokens"]) == (7, summary["tokens"])
+        assert queue.db.execute("SELECT sum(priced_calls) FROM usage_rollups").fetchone()[0] == 3
+    finally:
+        reader.close()
+        queue.close()
+
+
+def test_estimates_for_recovered_claude_history_with_and_without_original_write_counts(tmp_path, clock, history_home):
+    cfg = config(tmp_path)
+    telemetry = Telemetry(cfg)
+    db = telemetry.queue.db
+    reader = usage.UsageReader()
+    try:
+        when = clock.current - timedelta(days=2)
+        item = claude_history(when, service_tier="batch")
+        item["requestId"] = "new-claude-request"
+        item["message"]["model"] = "claude-current"
+        write_history(history_home / ".claude/projects/history/session.jsonl", [item])
+        telemetry.import_usage(threading.Event())
+        cache = telemetry.queue.pricing.path
+        cached = dict(models={"openai-model": [1, dict(input_cost_per_token=1, output_cost_per_token=2)]},
+                      checked=time.time(), etag='"test"', other_models={"claude-current": dict(
+                          input_cost_per_token=.01, output_cost_per_token=.02, input_cost_per_token_batches=.005,
+                          output_cost_per_token_batches=.01, cache_read_input_token_cost_batches=.001,
+                          cache_creation_input_token_cost_batches=.006, cache_creation_input_token_cost_above_1hr_batches=.008)})
+        cache.write_text(json.dumps(cached))
+        summary = usage.overview(cfg, 30, reader)["summary"]
+        assert (summary["calls"], summary["estimated_calls"], summary["tokens"]) == (1, 1, 160)
+        assert summary["cost_usd"] == pytest.approx(10 * .005 + 30 * .01 + 100 * .001 + 20 * .008)
+        with db:
+            usage._compact(db, clock.current.timestamp(), 10)
+        assert read(cfg)["summary"] == summary
+        # A pre-upgrade compacted receipt retains its tier and combined input only.
+        with db:
+            db.execute("DROP TABLE usage_price_inputs")
+        older = usage.overview(cfg, 30, reader)["summary"]
+        assert older["cost_usd"] == pytest.approx(30 * .005 + 30 * .01 + 100 * .001)
+        assert older["estimated_calls"] == 1 and older["tokens"] == 160
+    finally:
+        reader.close()
         telemetry.close()

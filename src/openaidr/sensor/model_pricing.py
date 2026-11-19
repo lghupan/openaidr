@@ -1,4 +1,4 @@
-"""Cached LiteLLM list prices for local Codex token accounting."""
+"""Cached LiteLLM list prices for local token accounting."""
 
 from datetime import timezone
 from decimal import Decimal
@@ -38,23 +38,30 @@ def token_rates(item):
 
 
 def rates_from_feed(data):
-    """Keep exact, direct OpenAI text-model rows and numeric token rates only."""
+    """Separate direct OpenAI quotes from additional exact IDs used by the display."""
     if not isinstance(data, dict):
         raise ValueError("Invalid model pricing catalog")
-    rows = {}
+    openai, others = {}, {}
     for model, item in data.items():
-        if (not isinstance(item, dict) or "/" in model or item.get("litellm_provider") != "openai"
+        if (not isinstance(item, dict) or not item.get("litellm_provider")
                 or item.get("mode") not in ("chat", "responses") or "tiered_pricing" in item):
             continue
-        rates = token_rates(item)
-        if FIELDS[0] in rates and FIELDS[-1] in rates:
-            rows[model] = rates
-    if not rows:
+        if FIELDS[0] not in item or FIELDS[-1] not in item:
+            continue
+        direct = "/" not in model and item["litellm_provider"] == "openai"
+        try:
+            rates = token_rates(item)
+        except (ValueError, OverflowError):
+            if direct:
+                raise
+            continue
+        (openai if direct else others)[model] = rates
+    if not openai:
         raise ValueError("No supported model prices")
-    return rows
+    return openai, others
 
 
-def token_cost(rates, tier, counts, attrs):
+def token_cost(rates, tier, counts, attrs, *, hour_writes=0):
     suffix = TIERS.get(tier)
     if suffix is None:
         return None
@@ -69,6 +76,9 @@ def token_cost(rates, tier, counts, attrs):
             units[FIELDS[2] + "_above_12hr"] = units.pop(FIELDS[2])
         elif retention not in (None, "", "30m"):
             return None
+    if hour_writes:
+        units[FIELDS[2]] -= hour_writes
+        units[FIELDS[2] + "_above_1hr"] = hour_writes
     cost = Decimal(0)
     for field, count in units.items():
         if count:
@@ -84,11 +94,13 @@ class Catalog:
         self.config = config
         self.path = Path(config["data_dir"]) / "model-pricing.json"
         self.rows = {}
+        self.other_models = {}
         self.etag = ""
         self.checked = 0
         self.missing = set()
         self.lock = threading.Lock()
         self.next_attempt = time.time() + random.uniform(0, 60)
+        self.due = 0
         try:
             with self.path.open("rb") as stream:
                 raw = stream.read(MAX_BYTES + 1)
@@ -101,10 +113,13 @@ class Catalog:
                     and etag.isprintable()):
                 raise ValueError("Invalid pricing cache metadata")
             self.rows = self._restore(cached["models"], checked)
-            self.etag, self.checked = etag, checked
+            self.checked = checked
+            if "other_models" in cached:
+                self.other_models = {k: token_rates(v) for k, v in cached["other_models"].items()}
+                self.etag = etag
+                self.due = self.checked + DAY * random.uniform(.95, 1)
         except (OSError, KeyError, ValueError, TypeError, RecursionError, AttributeError, OverflowError):
             pass
-        self.due = self.checked + DAY * random.uniform(.95, 1)
 
     @staticmethod
     def _restore(rows, checked):
@@ -149,7 +164,7 @@ class Catalog:
                 except (ValueError, TypeError, OverflowError):
                     pass
             if response.status_code == 304 and self.rows and self.etag:
-                rows = self.rows
+                rows, others = self.rows, self.other_models
                 etag = self.etag
             else:
                 response.raise_for_status()
@@ -163,7 +178,7 @@ class Catalog:
                     if len(body) + len(chunk) > MAX_BYTES:
                         raise ValueError("Oversized pricing catalog")
                     body.extend(chunk)
-                models = rates_from_feed(json.loads(body))
+                models, others = rates_from_feed(json.loads(body))
                 rows = {model: self.rows[model] if model in self.rows and self.rows[model][1] == rates
                         else (now, rates) for model, rates in models.items()}
                 etag = response.headers.get("etag", "")
@@ -171,10 +186,10 @@ class Catalog:
                     etag = ""
         # Include the notice in each cached copy. Publish data and its ETag together.
         notice = Path(__file__).with_name("litellm-LICENSE.txt").read_text(encoding="utf-8")
-        cached = dict(license=notice, checked=now, etag=etag, models=rows)
+        cached = dict(license=notice, checked=now, etag=etag, models=rows, other_models=others)
         atomic_write(self.path, json.dumps(cached, separators=(",", ":")))
         with self.lock:
-            self.rows, self.checked, self.etag = rows, now, etag
+            self.rows, self.other_models, self.checked, self.etag = rows, others, now, etag
             self.due = now + DAY * random.uniform(.95, 1)
 
     def run(self, stop, paused):

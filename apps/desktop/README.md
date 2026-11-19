@@ -237,7 +237,7 @@ databases are read. Existing installations import Codex and Claude usage only
 from before local collection began; Gemini imports once when support is first
 installed. This adds historical Gemini usage, not ongoing Gemini collection. The chart
 fills on its normal refresh; missing logs keep the existing zero totals.
-For local Codex cost estimates, a telemetry-enabled sensor reads LiteLLM's
+For local model cost estimates, a telemetry-enabled sensor reads LiteLLM's
 [public pricing catalog](https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json).
 Each device checks once a day on a staggered schedule. A new model can prompt
 an earlier check, at most once an hour. The background request goes to
@@ -250,12 +250,19 @@ and keeps its last valid table on disk for offline use. About includes the
 Provider-reported costs take precedence. For a Codex call without a reported
 cost, the sensor matches the direct OpenAI model ID, input length, cache rates,
 and service tier. If the catalog lacks an applicable rate, the sensor tries
-the bundled quote for that exact model and tier. If neither source covers
-the call, its cost is unknown. Saved costs keep
-their original values. Prices observed after a historical call cannot establish
-its cost; the previous bundled calculation still applies to those older calls.
-This update applies to the local Usage view. Server reports have a separate
-pricing snapshot. Rolling back restores bundled pricing for incoming calls.
+the bundled quote for that exact model and tier. Usage preserves recorded costs,
+including zero. For a call without a recorded cost, the display can estimate
+its API equivalent from the current cached rate for the exact model and its
+retained token breakdown. The input length of each request determines any
+long-context rate. A missing service tier uses standard pricing. Older records
+combine cache writes with uncached input, so the estimate uses the input rate
+for that combined count. These estimates cover token pricing and can differ
+from charges for regional processing or other service options. Estimates can change when rates change and are labeled
+in the selected period. A missing model, applicable rate, or token breakdown
+leaves the cost unknown. Aggregates that no longer have individual inputs
+can also retain unknown costs. Expand [Usage details](docs/usage-estimates.png)
+for pricing coverage and history recovery diagnostics. The local calculation leaves server reports
+and stored costs intact. Rolling back removes the display estimates.
 
 Only usage metadata enters the local ledger, with no transcript content or
 historical uploads. Restarting resumes an interrupted import without adding
@@ -344,8 +351,7 @@ See the [30-day view with today's cost](docs/usage-today.png) and the
 Older sensors without grouped data retain total-only daily bars.
 Days without calls show $0.00; calls without a known cost
 show N/A. Partially priced periods and days show the known cost and identify
-excluded unpriced calls. Daily bars use the stored total cost, without inferring
-cost shares from token counts. **Connection** expands the
+excluded unpriced calls. Daily bars include available per-request estimates. **Connection** expands the
 enrollment-link form below usage and keeps the status button visible.
 Long sensor errors scroll inside the popover. Compact update notices are
 truncated with their full text in a tooltip. Update recovery guidance also

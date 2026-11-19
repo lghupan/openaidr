@@ -3400,7 +3400,8 @@ for (const maxWindowHeight of [720,320]) {
       await expect(page.locator('#usage-cost')).toHaveText('$220.00');
       await expect(page.getByRole('heading',{name:'Models',exact:true})).toBeVisible();
       await expect(page.locator('#usage-legend')).toHaveText('CodexUnattributedClaude CodeClaude Cowork');
-      await expect(page.locator('#usage-coverage')).toHaveText('2 unpriced calls excluded. Unattributed usage has no recorded app identity. Older sensor versions did not retain it.');
+      await expect(page.locator('#usage-coverage')).toHaveText('Cost covers 20 of 22 calls.');
+      await expect(page.locator('#usage-detail-text')).toContainText('Unattributed usage has no recorded app identity.');
       await expect(page.locator('#usage-models .usage-row>div:first-child')).toHaveText([
         'gpt-6-luna$100.00','gpt-6-astra$60.00','legacy-model$30.00','gpt-6.1-sol$25.00','claude-opus-5-5$5.00','legacy-model-with-a-long-name-that-must-stay-readableN/A',
       ]);
@@ -3597,7 +3598,7 @@ for (const maxWindowHeight of [720,320]) {
   test(`shows history recovery results and incomplete sources in a ${maxWindowHeight}px work area`, async ({page}, testInfo) => {
     await page.clock.install({time:new Date('2026-10-07T12:30:00Z')});
     const counts = {tokens:9000000,cached_input_tokens:8000000,uncached_input_tokens:800000,output_tokens:200000,
-      calls:1240,priced_calls:1240,cost_usd:48.62};
+      calls:1240,priced_calls:1240,estimated_calls:250,cost_usd:48.62};
     const history_recovery = {recovered_calls:124,last_scan_at:'2026-10-07T12:25:00Z',blocked_files:1,
       inaccessible_sources:1,inaccessible_files:1,invalid_records:2,unsupported_records:1,pending_files:1,unreconciled_records:1};
     const share = (parts:number, cost:number) => ({...Object.fromEntries(Object.entries(counts).map(([key,value]) => [key,value / parts])),cost_usd:cost});
@@ -3608,7 +3609,17 @@ for (const maxWindowHeight of [720,320]) {
       by_model:['gpt-6-astra','gpt-6.1-sol','claude-fable-5-1','claude-opus-5-5'].map((name,index) => ({name,...share(4,costs[index]!)})),
       by_reasoning_effort:['high','low','medium','xhigh'].map((name,index) => ({name,...share(4,costs[index]!)}))}});
     const app = page.locator('#app');
-    const coverage = page.locator('#usage-coverage');
+    const coverage = page.locator('#usage-detail-text');
+    const toggle = page.locator('#usage-details summary');
+    await expect(page.locator('#usage-coverage')).toHaveText('250 calls estimated at current rates.');
+    await expect(coverage).toBeHidden();
+    expect(await app.evaluate(node => node.scrollWidth <= node.clientWidth)).toBe(true);
+    if (maxWindowHeight === 720) await expectFitsWindow(page);
+    await page.screenshot({path:testInfo.outputPath(`usage-estimates-${maxWindowHeight}.png`),animations:'disabled'});
+    await toggle.focus();
+    await page.keyboard.press('Enter');
+    await expect(coverage).toBeVisible();
+    await expect(coverage).toContainText('Missing service tiers use standard pricing.');
     await expect(coverage).toContainText('History recovery: 124 additional calls in the last 30 days.');
     await expect(coverage).toContainText('Last checked');
     await expect(coverage).toContainText('Some history sources could not be read.');
@@ -3617,8 +3628,7 @@ for (const maxWindowHeight of [720,320]) {
     await expect(coverage).toContainText('Some older history could not be updated.');
     await expect(coverage).toContainText('Waiting for history files to finish writing.');
     expect(await app.evaluate(node => node.scrollWidth <= node.clientWidth)).toBe(true);
-    if (maxWindowHeight === 720) await expectFitsWindow(page);
-    else {
+    if (maxWindowHeight === 320) {
       await coverage.scrollIntoViewIfNeeded();
       await expect(coverage).toBeInViewport({ratio:1});
       await app.evaluate(node => { node.scrollTop = node.scrollHeight; });
@@ -3764,7 +3774,7 @@ for (const timezoneId of ['America/Los_Angeles', 'Asia/Kathmandu']) {
         await expect(page.getByRole('heading', {name:'Daily estimated cost'})).toBeVisible();
         await expect(page.locator('#usage-average')).toHaveText('$83.53');
         await expectUsageAverageLine(page, (167.06 / 2) / 134.92);
-        await expect(page.locator('#usage-coverage')).toHaveText('2 unpriced calls excluded.');
+        await expect(page.locator('#usage-coverage')).toHaveText('Cost covers 18 of 20 calls.');
         await expect(page.getByRole('tooltip')).toBeHidden();
         await expect(page.locator('#usage-chart').getByRole('img')).toHaveCount(30);
         await expect(page.locator('#usage-axis span')).toHaveText(['Sep 8','Oct 7']);

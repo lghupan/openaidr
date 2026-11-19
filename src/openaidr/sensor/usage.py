@@ -10,6 +10,7 @@ import sqlite3
 import time
 
 from openaidr.core.reasoning import EFFORTS
+from . import usage_estimates
 
 
 MAX_RECORDS = 100_000
@@ -120,6 +121,7 @@ def initialize(db, scope):
             PRIMARY KEY (scope,bucket)
         );
     """ + "\n".join(triggers) + "\nCOMMIT;")
+    usage_estimates.initialize(db)
     db.execute("INSERT OR IGNORE INTO usage_history(scope,started_at) VALUES (?,?)",
                (scope, datetime.now(timezone.utc).timestamp()))
     if "usage_projected" not in {row[1] for row in db.execute("PRAGMA table_info(exports)")}:
@@ -205,6 +207,8 @@ def record_calls(db, scope, events):
          for event in events if event["usage"]["cost"] is not None],
     )
 
+    usage_estimates.remember(db, events)
+
 
 def local_start(now, days):
     # Resolve the offset at the target midnight, including daylight-saving changes.
@@ -264,13 +268,14 @@ def _compact(db, before, limit):
             cost_usd=CASE WHEN cost_usd IS NULL AND excluded.cost_usd IS NULL THEN NULL
                          ELSE coalesce(cost_usd,0)+coalesce(excluded.cost_usd,0) END
     """)
+    usage_estimates.compact(db, original)
     db.execute(f"INSERT INTO usage_compacted SELECT event_key,happened_at FROM usage_calls u WHERE {original}")
     db.execute("DELETE FROM usage_calls WHERE rowid IN (SELECT id FROM usage_pruning)")
     db.execute("DELETE FROM usage_pruning")
 
 
 def _query(db, since, until, has_tokens, has_apps, first_hour=None, hour_offset=None, deduplicate=False,
-           has_rollups=False):
+           has_rollups=False, estimates=False):
     detail = """coalesce(sum(t.cached_input_tokens),0) AS cached_input_tokens,
                 coalesce(sum(t.uncached_input_tokens),0) AS uncached_input_tokens,
                 coalesce(sum(t.output_tokens),0) AS output_tokens,
@@ -286,7 +291,7 @@ def _query(db, since, until, has_tokens, has_apps, first_hour=None, hour_offset=
     slot = f",CAST((u.happened_at-{int(hour_offset)})/3600 AS INTEGER) AS hour_bucket" if hour_offset is not None else ""
     source = ("(SELECT *,row_number() OVER (PARTITION BY event_key ORDER BY rowid) AS occurrence FROM usage_calls)"
               if deduplicate else "usage_calls")
-    return db.execute(f"""
+    rows = db.execute(f"""
         SELECT {bucket} AS bucket,model,effort,{application} AS application,
                count(*) AS calls,count(cost_usd) AS priced_calls,
                sum(u.tokens) AS tokens,sum(cost_usd) AS cost_usd,{detail}{slot}
@@ -295,6 +300,9 @@ def _query(db, since, until, has_tokens, has_apps, first_hour=None, hour_offset=
         {'AND NOT EXISTS (SELECT 1 FROM usage_compacted c WHERE c.event_key=u.event_key)' if has_rollups else ''}
         GROUP BY bucket,model,effort,application{',hour_bucket' if slot else ''}
     """, (*params, since, until)).fetchall()
+    if estimates:
+        rows.extend(usage_estimates.groups(db, since, until, bucket, params, slot, first_hour is not None))
+    return rows
 
 
 def _rollup_query(db, since, until):
@@ -313,6 +321,8 @@ class UsageReader:
         self.key = None
         self.hours = {}
         self.hook_reports = {}
+        self.pricing_key = None
+        self.estimates = False
 
     def close(self):
         if self.db is not None:
@@ -320,6 +330,8 @@ class UsageReader:
         self.db = self.key = None
         self.hours.clear()
         self.hook_reports.clear()
+        self.pricing_key = None
+        self.estimates = False
 
     def hook_overview(self, config, period, since, until, *, cache):
         from .hook_estimates import overview
@@ -354,11 +366,16 @@ class UsageReader:
             self.key = key
         db = self.db
         try:
-            db.execute("BEGIN")
             tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
             if "usage_calls" not in tables:
                 self.hours.clear()
                 return {}, None
+            pricing_key = (usage_estimates.cache_key(config), frozenset(tables))
+            if self.pricing_key != pricing_key:
+                self.estimates = usage_estimates.configure(db, config, tables) if pricing_key[0] else False
+                self.pricing_key = pricing_key
+                self.hours.clear()
+            db.execute("BEGIN")
             history = db.execute("SELECT min(started_at) AS started_at,max(truncated_at) AS truncated_at "
                                  "FROM usage_history").fetchone()
             if history["started_at"] is None:
@@ -384,10 +401,10 @@ class UsageReader:
             if not cache or "usage_revisions" not in tables or duplicates:
                 self.hours.clear()
                 rows = {False: _query(db, start, end, has_tokens, has_apps, deduplicate=duplicates,
-                                     has_rollups=has_rollups)}
+                                     has_rollups=has_rollups, estimates=self.estimates)}
                 if with_hours:
                     rows[True] = _query(db, cutoff, end, has_tokens, has_apps, first, deduplicate=duplicates,
-                                        has_rollups=has_rollups)
+                                        has_rollups=has_rollups, estimates=self.estimates)
                 if has_rollups:
                     rows[False].extend(_rollup_query(db, start, end))
                 return rows, history
@@ -402,13 +419,14 @@ class UsageReader:
                 cached = self.hours.get(hour)
                 if cached is None or cached[0] != tag:
                     cached = (tag, _query(db, left, right, has_tokens, has_apps, hour_offset=offset,
-                                         has_rollups=has_rollups))
+                                         has_rollups=has_rollups, estimates=self.estimates))
                     self.hours[hour] = cached
                 rows[False].extend(cached[1])
                 if with_hours and right > cutoff:
                     selected = cached[1] if left >= cutoff else _query(db, cutoff, right, has_tokens, has_apps,
-                                                                     hour_offset=offset, has_rollups=has_rollups)
-                    rows[True].extend(dict(row, bucket=row['hour_bucket'] - int(first // 3600)) for row in selected)
+                                                                     hour_offset=offset, has_rollups=has_rollups, estimates=self.estimates)
+                    rows[True].extend(dict(row, bucket=row['hour_bucket'] - int(first // 3600)) for row in selected
+                                      if not isinstance(row, dict) or not row.get('compacted'))
             if has_rollups:
                 rows[False].extend(_rollup_query(db, start, end))
             return rows, history
@@ -464,6 +482,8 @@ def overview(config, days, reader=None):
                 for field in ("calls", "priced_calls", "tokens", "cached_input_tokens",
                               "uncached_input_tokens", "output_tokens", "unclassified_tokens"):
                     target[field] += row[field]
+                if isinstance(row, dict) and row.get("estimated_calls"):
+                    target["estimated_calls"] = target.get("estimated_calls", 0) + row["estimated_calls"]
                 if row["cost_usd"] is not None:
                     target["cost_usd"] = (target["cost_usd"] or 0) + row["cost_usd"]
         incomplete = not history or history["started_at"] > since.timestamp() or (
