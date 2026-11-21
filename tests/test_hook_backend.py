@@ -889,3 +889,21 @@ def test_unbound_managed_session_never_uses_ordinary_backend(tmp_path, monkeypat
         launch.end(started=False)
         sensor.spool.close()
         sensor.client.close()
+
+
+def test_capability_probe_timeout_invalidates_evidence_and_logs_safe_reason(tmp_path,monkeypatch,caplog):
+    import logging
+    import subprocess
+    cfg=Config(tmp_path/'config',data_dir=str(tmp_path/'data')); cfg.save()
+    record=tmp_path/'data/codex-hook-capability.json'
+    record.parent.mkdir(parents=True,exist_ok=True); record.write_text('{"old":"evidence"}')
+    native=tmp_path/'codex'; native.write_text('#!/bin/sh\necho codex-cli 0.160.0\n'); native.chmod(0o700)
+    monkeypatch.setattr(hooks.shutil,'which',lambda _:str(native))
+    def unavailable(*args,**kwargs):
+        raise subprocess.TimeoutExpired(args[0],kwargs['timeout'],output='private-probe-output')
+    monkeypatch.setattr(hooks.subprocess,'run',unavailable)
+    with caplog.at_level(logging.DEBUG,logger=hooks.__name__):
+        hooks.record_result_capability(cfg.path,'codex')
+    assert not record.exists() and not hooks.result_capable(cfg,'codex')
+    assert 'TimeoutExpired' in caplog.text
+    assert 'private-probe-output' not in caplog.text and str(native) not in caplog.text
