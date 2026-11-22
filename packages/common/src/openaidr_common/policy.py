@@ -37,29 +37,31 @@ def compile_glob(pattern, host=False, *, path_windows=None, path_home=None):
                 out += "[^/]*"
         elif c == "?":
             out += "." if host else "[^/]"
-        elif c == "[" and (
-            end := pattern.find(
-                "]",
-                i + (
-                    3
-                    if pattern[i + 1 : i + 2] == "!"
-                    and pattern[i + 2 : i + 3] == "]"
-                    else 2
-                ),
-            )
-        ) >= 0:
-            # A "]" right after "[" (or "[!") is a literal class member.
-            cls = pattern[i + 1 : end]
-            if cls.startswith("!"):
-                cls = "^" + cls[1:]
-            elif cls.startswith("^"):
-                # Only "!" negates in a glob class; a leading "^" is literal.
-                cls = "\\" + cls
-            # Escape "[" inside the class: re treats it literally but emits
-            # FutureWarning: Possible nested set, so "[[]" compiled to "^[[]$".
-            cls = cls.replace("[", "\\[")
-            out += "[" + cls + "]"
-            i = end
+        elif c == "[":
+            # A leading "]" is a literal class member when a later "]" closes
+            # the class ([]] / [!]] / [^]]). Keep caret negation as on main
+            # so existing [^a] path/host rules still match.
+            j = i + 1
+            if j < len(pattern) and pattern[j] in "!^":
+                j += 1
+            if (
+                j < len(pattern)
+                and pattern[j] == "]"
+                and "]" in pattern[j + 1 :]
+            ):
+                j += 1
+            end = pattern.find("]", j)
+            if end < 0:
+                out += re.escape(c)
+            else:
+                cls = pattern[i + 1 : end]
+                if cls.startswith("!"):
+                    cls = "^" + cls[1:]
+                # Escape "[" inside the class: re treats it literally but
+                # emits FutureWarning: Possible nested set for "[[]".
+                cls = cls.replace("[", "\\[")
+                out += "[" + cls + "]"
+                i = end
         else:
             out += re.escape(c)
         i += 1
