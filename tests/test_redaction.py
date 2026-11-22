@@ -169,8 +169,12 @@ def test_multiple_credentials_and_json_assignments_preserve_structure():
 
 
 def test_deeply_nested_values_fail_closed_instead_of_raising_recursion_error():
+    # Build the live list iteratively: json.loads of a 1000-deep nest raises
+    # RecursionError on Python 3.11 before the redactor runs.
+    live = []
+    for _ in range(1000):
+        live = [live]
     deep = "[" * 1000 + "]" * 1000
-    live = json.loads(deep)
     assert shared_redact.contains_secret(live) is True
     assert shared_redact.contains_secret(deep) is True
     assert "[REDACTED:depth-limit]" in json.dumps(shared_redact.redact_value(live))
