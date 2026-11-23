@@ -1,6 +1,8 @@
 """Regression fixtures carried forward from the original Go sensor tests."""
 
 import json
+import warnings
+
 import pytest
 from openaidr.sensor.collectors import Parser
 from openaidr.core.policy import Policy, compile_glob
@@ -104,6 +106,28 @@ def test_original_codex_rollout():
 )
 def test_original_path_globs(pattern, path, expected):
     assert bool(compile_glob(pattern).match(path)) == expected
+
+
+@pytest.mark.parametrize(
+    "pattern,path,expected",
+    [
+        ("[]]", "]", True),
+        ("[]]", "a", False),
+        ("[^]]", "]", False),
+        ("[^]]", "a", True),
+        ("[!]]", "]", False),
+        ("[!]]", "a", True),
+        ("[[]", "[", True),
+        ("[[]", "a", False),
+        # Caret negation matches main: [^a] rejects a, accepts b.
+        ("item-[^a]", "item-a", False),
+        ("item-[^a]", "item-b", True),
+    ],
+)
+def test_glob_character_class_leading_bracket_and_caret(pattern, path, expected):
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", FutureWarning)
+        assert bool(compile_glob(pattern).match(path)) == expected
 
 
 @pytest.mark.parametrize(
