@@ -1350,7 +1350,9 @@ def record_result_capability(config_path, agent):
                 return
             record.update(launcher=identity, executable=native_identity)
         atomic_write(path, json.dumps(record))
-    except (OSError, ValueError, subprocess.SubprocessError):
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        # Probe output and executable paths may contain private information.
+        logging.getLogger(__name__).debug("Result capability probe unavailable (%s)", type(exc).__name__)
         # Lack of capability evidence only disables result replacement.
         return
 
