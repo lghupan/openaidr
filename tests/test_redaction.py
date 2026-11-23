@@ -1,3 +1,4 @@
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -182,6 +183,40 @@ def test_deeply_nested_values_fail_closed_instead_of_raising_recursion_error():
     ordinary = "[" * 50 + "]" * 50
     assert shared_redact.contains_secret(ordinary) is False
     assert shared_redact.redact_value(ordinary) == ordinary
+
+
+def test_redact_value_redacts_credentials_in_dict_keys():
+    first = "AKIAIOSFODNN7EXAMPLE"
+    second = "AKIAIOSFODNN7EXAMPLF"
+    marker = "[REDACTED:aws-access-key]"
+    value = {first: "first", second: "second"}
+    assert shared_redact.redact_value(value) == {
+        f"{marker}#1": "first",
+        f"{marker}#2": "second",
+    }
+    for key in (1, None):
+        with pytest.raises(TypeError):
+            shared_redact.redact_value({key: "value"})
+
+
+def test_redact_value_skips_occupied_replacement_keys():
+    secret = "AKIAIOSFODNN7EXAMPLE"
+    marker = "[REDACTED:aws-access-key]"
+    occupied = f"{marker}#1"
+    value = {secret: "from-secret", occupied: "preexisting"}
+    result = shared_redact.redact_value(value)
+    assert result == {occupied: "preexisting", f"{marker}#2": "from-secret"}
+    assert secret not in result
+
+
+def test_redact_value_dict_key_suffix_is_not_a_secret_fingerprint():
+    key = "password=hunter2"
+    result = shared_redact.redact_value({key: "ok"})
+    assert key not in result
+    replacement = next(iter(result))
+    assert replacement == "password=[REDACTED:assignment]#1"
+    assert "hunter2" not in replacement
+    assert hashlib.sha256(key.encode()).hexdigest()[:8] not in replacement
 
 
 def test_overlapping_rules_remove_the_union_without_scanning_markers(tmp_path):

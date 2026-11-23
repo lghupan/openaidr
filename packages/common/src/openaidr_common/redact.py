@@ -104,6 +104,16 @@ def is_secret_key(key):
     return _REDACTOR.is_secret_key(key)
 
 
+def _unique_redacted_key(marker, used, next_id):
+    # Ordinal suffix is independent of the secret. Skip names already taken by
+    # kept keys or earlier replacements in this dict.
+    while True:
+        candidate = f"{marker}#{next_id[0]}"
+        next_id[0] += 1
+        if candidate not in used:
+            return candidate
+
+
 def contains_secret(value, _depth=0):
     if _depth > MAX_DEPTH:
         return True
@@ -132,17 +142,32 @@ def contains_secret(value, _depth=0):
     return secret_key or contains_secret(decoded, _depth + 1)
 
 
-
-
 def redact_value(value, _depth=0):
     """Apply the shared sensor credential rules to nested backend evidence."""
     if _depth > MAX_DEPTH:
         return "[REDACTED:depth-limit]"
     if isinstance(value, dict):
-        return {
-            key: "[REDACTED]" if is_secret_key(key) else redact_value(item, _depth + 1)
-            for key, item in value.items()
+        items = list(value.items())
+        # Keys that stay unchanged keep their names; replacements must not
+        # overwrite them or each other.
+        used = {
+            key
+            for key, _ in items
+            if not isinstance(key, str) or redact_string(key)[0] == key
         }
+        next_id = [1]
+        out = {}
+        for key, item in items:
+            original = key
+            if isinstance(key, str):
+                redacted = redact_string(key)[0]
+                if redacted != key:
+                    key = _unique_redacted_key(redacted, used, next_id)
+            used.add(key)
+            out[key] = (
+                "[REDACTED]" if is_secret_key(original) else redact_value(item, _depth + 1)
+            )
+        return out
     if isinstance(value, list):
         return [redact_value(item, _depth + 1) for item in value]
     if isinstance(value, str):
